@@ -1,0 +1,29 @@
+.DS_Store
+__pycache__/
+*.pyc
+node_modules/
+.pnpm-store/
+.cache/
+
+# Local archive of material not needed to build/run the app
+.archive/
+
+# Local scratch (working copies and review shots)
+.work/
+
+# Build output
+app/build/
+firmware/build/
+firmware/sdkconfig
+firmware/sdkconfig.old
+firmware/managed_components/
+
+# Local agent instructions
+/AGENTS.md
+
+# Provisioning output: Wi-Fi config images and TLS keys/certs
+cue9cfg*.bin
+*.key
+*.crt
+*.pem
+.env

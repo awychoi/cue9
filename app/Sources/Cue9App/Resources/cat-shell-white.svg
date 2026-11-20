@@ -1,0 +1,90 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="480" height="580" viewBox="0 0 480 580">
+  <defs>
+    <linearGradient id="body" x1="100" y1="60" x2="380" y2="530" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFFDF8"/>
+      <stop offset=".48" stop-color="#F3EEE4"/>
+      <stop offset="1" stop-color="#D8D1C3"/>
+    </linearGradient>
+    <linearGradient id="ear" x1="70" y1="20" x2="210" y2="220" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFFCF6"/>
+      <stop offset=".5" stop-color="#EEE8DC"/>
+      <stop offset="1" stop-color="#D2CABC"/>
+    </linearGradient>
+    <linearGradient id="bezel" x1="150" y1="100" x2="340" y2="500" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#3A3D3F"/>
+      <stop offset=".42" stop-color="#26292B"/>
+      <stop offset="1" stop-color="#101213"/>
+    </linearGradient>
+    <radialGradient id="frontlight" cx="160" cy="120" r="310" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity=".38"/>
+      <stop offset=".55" stop-color="#FFFFFF" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="frontshade" cx="350" cy="500" r="270" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#8C8376" stop-opacity=".20"/>
+      <stop offset=".7" stop-color="#8C8376" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="edgevignette" cx="50%" cy="50%" r="50%">
+      <stop offset=".66" stop-color="#000000" stop-opacity="0"/>
+      <stop offset="1" stop-color="#000000" stop-opacity=".20"/>
+    </radialGradient>
+    <radialGradient id="screenshade" cx="240" cy="300" r="181" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#000000" stop-opacity="0"/>
+      <stop offset=".72" stop-color="#000000" stop-opacity="0"/>
+      <stop offset="1" stop-color="#000000" stop-opacity=".55"/>
+    </radialGradient>
+    <radialGradient id="drop" cx="50%" cy="50%" r="50%">
+      <stop offset="0" stop-color="#000000" stop-opacity="0.34"/>
+      <stop offset=".65" stop-color="#000000" stop-opacity="0.17"/>
+      <stop offset="1" stop-color="#000000" stop-opacity="0"/>
+    </radialGradient>
+    <clipPath id="bodyclip"><circle cx="240" cy="300" r="230"/></clipPath>
+  </defs>
+
+  <!-- contact shadow -->
+  <ellipse cx="240" cy="540" rx="192" ry="20" fill="url(#drop)"/>
+
+  <!-- symmetric ears seated on the shell edge -->
+<g id="ears">
+  <path d="M343.2,94.5 L409.7,78.9 C427.2,74.7 440.4,86.2 438.6,104.2 L432,173.4 A230,230 0 0 0 343.2,94.5 Z" fill="url(#ear)" stroke="#B7AFA1" stroke-width="1.3" stroke-linejoin="round"/>
+  <path d="M136.8,94.5 L70.3,78.9 C52.8,74.7 39.6,86.2 41.4,104.2 L48,173.4 A230,230 0 0 1 136.8,94.5 Z" fill="url(#ear)" stroke="#B7AFA1" stroke-width="1.3" stroke-linejoin="round"/>
+</g>
+
+  <!-- shell body -->
+  <circle cx="240" cy="300" r="230" fill="url(#body)" stroke="#B7AFA1" stroke-width="1.4"/>
+  <g clip-path="url(#bodyclip)">
+    <circle cx="240" cy="300" r="230" fill="url(#frontlight)"/>
+    <circle cx="240" cy="300" r="230" fill="url(#frontshade)"/>
+    <circle cx="240" cy="300" r="230" fill="url(#edgevignette)"/>
+  </g>
+  <circle cx="240" cy="300" r="219" fill="none" stroke="#B7AFA1" stroke-opacity=".16" stroke-width="1"/>
+  <path d="M20.45,237.04 A228.4,228.4 0 0 1 302.96,80.45" fill="none" stroke="#FFFFFF" stroke-opacity=".55" stroke-width="1.6" stroke-linecap="round"/>
+  <circle cx="240" cy="300" r="215" fill="none" stroke="#FFFFFF" stroke-opacity=".10" stroke-width="1"/>
+  <path d="M437.89,414.25 A228.5,228.5 0 0 1 42.11,414.25" fill="none" stroke="#FFFFFF" stroke-opacity=".22" stroke-width="1.2" stroke-linecap="round"/>
+
+  <!-- recessed screen bezel -->
+  <circle cx="240" cy="300" r="202" fill="url(#bezel)" stroke="#080A0B" stroke-width="1.4"/>
+  <circle cx="240" cy="300" r="201.2" fill="none" stroke="#8A9093" stroke-opacity=".30" stroke-width="1"/>
+  <circle cx="240" cy="300" r="181.8" fill="none" stroke="#080A0B" stroke-opacity=".9" stroke-width="1.4"/>
+
+  <!-- display -->
+  <circle cx="240" cy="300" r="181" fill="#000808"/>
+  <circle cx="240" cy="300" r="181" fill="url(#screenshade)"/>
+  <path d="M76.68,223.84 A180.2,180.2 0 0 1 301.63,130.67" fill="none" stroke="#FFFFFF" stroke-opacity=".06" stroke-width="1" stroke-linecap="round"/>
+
+  <!-- ear screws -->
+<g>
+  <circle cx="64" cy="101.8" r="4.8" fill="#363733" stroke="#B9B2A6" stroke-opacity=".25" stroke-width=".8"/>
+  <circle cx="64" cy="101.8" r="2.8" fill="#0B0C0B"/>
+  <path d="M58.3,99.7 A3.5,3.5 0 0 1 65,99.5" fill="none" stroke="#B9B2A6" stroke-opacity=".55" stroke-width=".7" stroke-linecap="round"/>
+  <circle cx="416" cy="101.8" r="4.8" fill="#363733" stroke="#B9B2A6" stroke-opacity=".25" stroke-width=".8"/>
+  <circle cx="416" cy="101.8" r="2.8" fill="#0B0C0B"/>
+  <path d="M410.3,99.7 A3.5,3.5 0 0 1 417,99.5" fill="none" stroke="#B9B2A6" stroke-opacity=".55" stroke-width=".7" stroke-linecap="round"/>
+</g>
+
+  <!-- top microphone / sensor pinhole -->
+  <circle cx="240" cy="72" r="3.2" fill="#252622" stroke="#B9B2A6" stroke-opacity=".18" stroke-width=".7"/>
+  <circle cx="240" cy="72" r="1.8" fill="#000000"/>
+
+  <!-- subtle mould seam around the front face -->
+  <circle cx="240" cy="300" r="223" fill="none" stroke="#B7AFA1" stroke-opacity=".12" stroke-width=".8"/>
+</svg>
