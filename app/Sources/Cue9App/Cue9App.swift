@@ -75,7 +75,6 @@ final class Cue9AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window.appearance = savedAppearance.nsAppearance
         window.delegate = self
         window.contentView = hosting
-        hosting.appearance = savedAppearance.nsAppearance
         window.center()
         self.window = window
         model.resumeBackgroundWork()
@@ -93,8 +92,10 @@ final class Cue9AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 let saved = UserDefaults.standard.string(forKey: "appearance")
                     .flatMap(AppearanceMode.init(rawValue:)) ?? .system
                 guard let window = self?.window else { return }
-                window.appearance = saved.nsAppearance
-                window.contentView?.appearance = saved.nsAppearance
+                let wanted = saved.nsAppearance
+                if window.appearance != wanted {
+                    window.appearance = wanted
+                }
             }
         }
     }

@@ -30,11 +30,9 @@ struct RootView: View {
     }
 
     var body: some View {
-        if let scheme = appearance.colorScheme {
-            content.preferredColorScheme(scheme)
-        } else {
-            content
-        }
+        // Always the same view shape: switching to or from System must not
+        // rebuild the page and lose its scroll position.
+        content.preferredColorScheme(appearance.colorScheme)
     }
 
     private var content: some View {

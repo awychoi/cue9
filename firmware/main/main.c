@@ -30,12 +30,12 @@
 
 #include "raster.h"
 #include "pip_scene.h"
+#include "ambient.h"
 #include "cue9_config.h"
 #include "cue9_wifi.h"
 
 #define TAG "PIPLIVE"
-#define BODY_ROWS 320
-#define BOTTOM_ROWS (360 - BODY_ROWS)
+#define BODY_ROWS 360
 #define STAGE_ROWS 90   /* internal DMA bounce for the PSRAM body */
 
 #define PIN_PCLK   18
@@ -57,9 +57,7 @@ static r_dl s_dl;
 static pip_scene s_scene;
 static pip_opts s_opt;
 static uint16_t *s_body;
-static uint16_t *s_bottom;
 static uint16_t *s_stage;
-static uint16_t s_bottom_bg = 0xFFFF;
 static volatile uint32_t s_done;
 
 /* Panel tearing-effect (TE) sync. The ST77916 drives GPIO8 high at the start
@@ -74,6 +72,7 @@ static TaskHandle_t s_build_task;
 static volatile bool s_build_done;
 static volatile bool s_build_reset;
 static volatile int s_build_state;
+static volatile int s_build_page;
 static volatile float s_build_t;
 static volatile float s_build_dt;
 static volatile int64_t s_build_us;
@@ -126,6 +125,14 @@ typedef struct {
 static gauge_state s_gauge;
 static portMUX_TYPE s_gauge_mux = portMUX_INITIALIZER_UNLOCKED;
 
+/* The touch controller shares I2C0 with the gauge; the legacy master driver
+ * has no cross-task lock, so one mutex covers every transaction. */
+static SemaphoreHandle_t s_i2c_mux;
+
+#define CST816_ADDR 0x15
+#define CST816_REG_POINTS 0x02
+static volatile int s_touch_nav;   /* +1 next page, -1 previous, 0 none */
+
 #define BQ27220_ADDR 0x55
 #define REG_TEMPERATURE 0x06
 #define REG_VOLTAGE 0x08
@@ -136,8 +143,10 @@ static portMUX_TYPE s_gauge_mux = portMUX_INITIALIZER_UNLOCKED;
 static esp_err_t bq_read16(uint8_t reg, uint16_t *out)
 {
     uint8_t b[2];
+    if (s_i2c_mux) xSemaphoreTake(s_i2c_mux, portMAX_DELAY);
     esp_err_t e = i2c_master_write_read_device(I2C_NUM_0, BQ27220_ADDR, &reg, 1, b, 2,
                                                pdMS_TO_TICKS(50));
+    if (s_i2c_mux) xSemaphoreGive(s_i2c_mux);
     if (e != ESP_OK) return e;
     *out = (uint16_t)b[0] | ((uint16_t)b[1] << 8);
     return ESP_OK;
@@ -190,6 +199,51 @@ static void gauge_task(void *arg)
     for (;;) {
         gauge_update();
         vTaskDelay(pdMS_TO_TICKS(2000));
+    }
+}
+
+/* Core 0: CST816S swipe. Reads points/x/y in one transaction and turns a
+ * mostly-horizontal drag into a page step on release. The controller reports
+ * before and after sleep on its own; no reset or config is needed here. */
+static void touch_task(void *arg)
+{
+    (void)arg;
+    bool down = false;
+    int x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+    bool logged = false;
+    for (;;) {
+        uint8_t reg = CST816_REG_POINTS;
+        uint8_t b[5];
+        esp_err_t e;
+        if (s_i2c_mux) xSemaphoreTake(s_i2c_mux, portMAX_DELAY);
+        e = i2c_master_write_read_device(I2C_NUM_0, CST816_ADDR, &reg, 1, b, sizeof(b),
+                                         pdMS_TO_TICKS(20));
+        if (s_i2c_mux) xSemaphoreGive(s_i2c_mux);
+        if (e == ESP_OK) {
+            int pts = b[0] & 0x0f;
+            int x = ((b[1] & 0x0f) << 8) | b[2];
+            int y = ((b[3] & 0x0f) << 8) | b[4];
+            if (pts > 0) {
+                if (!down) { down = true; x0 = x; y0 = y; }
+                x1 = x;
+                y1 = y;
+                if (!logged) {
+                    logged = true;
+                    ESP_LOGI(TAG, "touch works (%d,%d)%s", x, y, pts > 1 ? " multi" : "");
+                }
+            } else if (down) {
+                down = false;
+                int dx = x1 - x0, dy = y1 - y0;
+                if (abs(dx) >= 40 && abs(dx) > abs(dy)) {
+                    s_touch_nav = dx < 0 ? 1 : -1;
+                    ESP_LOGI(TAG, "swipe %s (%d,%d)->(%d,%d)", dx < 0 ? "next" : "prev",
+                             x0, y0, x1, y1);
+                } else {
+                    ESP_LOGI(TAG, "tap (%d,%d)", x1, y1);
+                }
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(30));
     }
 }
 
@@ -409,9 +463,9 @@ static void panel_init(void)
  * green above 3 bars, yellow at 3/2, red at 1/0; the shell and tip take the
  * same colour as the bars so an almost-empty battery still reads as red rather
  * than an empty grey outline. Bolt only while charging. */
-static void draw_battery(r_dl *dl, const gauge_state *g)
+static void draw_battery(r_dl *dl, const gauge_state *g, float by)
 {
-    const float bx = 180.0f, by = 22.0f;
+    const float bx = 180.0f;
     int soc = g->valid ? g->soc : 0;
     if (soc < 0) soc = 0;
     if (soc > 100) soc = 100;
@@ -502,11 +556,174 @@ static void color_bind(int state)
     }
 }
 
+/* Ambient pages. The Pi (or a Mac on USB) pushes wall-clock time and weather.
+ * These lines are data, not agent state: they deliberately skip the Mac
+ * liveness clock below, or the hub fallback would never fire. */
+static portMUX_TYPE s_amb_mux = portMUX_INITIALIZER_UNLOCKED;
+static int64_t s_time_epoch;      /* UTC seconds at sync */
+static int64_t s_time_sync_us;    /* esp_timer_get_time() at sync */
+static int32_t s_time_tz_min;
+static int32_t s_time_fmt24;
+static bool s_time_set;
+static amb_wx s_wx;
+
+static volatile int s_page_cmd = -1;      /* PAGE n from the host */
+static volatile uint32_t s_page_cmd_seq;
+
+static bool parse_ll(const char **pp, long long *out)
+{
+    char *end = NULL;
+    long long v = strtoll(*pp, &end, 10);
+    if (end == *pp) return false;
+    *pp = end;
+    *out = v;
+    return true;
+}
+
+static void handle_time(char *args)
+{
+    const char *p = args;
+    long long epoch = 0, off = 0, fmt = 12;
+    if (!parse_ll(&p, &epoch) || !parse_ll(&p, &off)) {
+        ESP_LOGW(TAG, "bad time line");
+        return;
+    }
+    if (!parse_ll(&p, &fmt)) fmt = 12;
+    if (fmt != 24) fmt = 12;
+    int64_t now = esp_timer_get_time();
+    portENTER_CRITICAL(&s_amb_mux);
+    s_time_epoch = (int64_t)epoch;
+    s_time_sync_us = now;
+    s_time_tz_min = (int32_t)off;
+    s_time_fmt24 = (fmt == 24);
+    s_time_set = true;
+    portEXIT_CRITICAL(&s_amb_mux);
+    static int64_t last_log;
+    if (now - last_log > 60000000LL) {
+        last_log = now;
+        ESP_LOGI(TAG, "time %lld tz=%lld fmt=%lld", epoch, off, fmt);
+    }
+}
+
+/* WX <icon>|<temp>|<hi>|<lo>|<feels>|<CITY> */
+static void handle_wx(char *args)
+{
+    amb_wx w;
+    amb_wx_default(&w);
+    char *save = NULL;
+    char *tok = strtok_r(args, "|", &save);
+    int v[4] = { 0, 0, 0, 0 };
+    const char *city = "";
+    if (tok == NULL) return;
+    if (strcmp(tok, "sunny") == 0) w.code = AMB_SUNNY;
+    else if (strcmp(tok, "rain") == 0) w.code = AMB_RAIN;
+    else if (strcmp(tok, "snow") == 0) w.code = AMB_SNOW;
+    else w.code = AMB_PARTLY;
+    for (int i = 0; i < 4; i++) {
+        tok = strtok_r(NULL, "|", &save);
+        if (tok == NULL) return;
+        v[i] = atoi(tok);
+        if (v[i] < -99) v[i] = -99;
+        if (v[i] > 199) v[i] = 199;
+    }
+    tok = strtok_r(NULL, "|", &save);
+    if (tok != NULL && tok[0] != 0 && tok[1] == 0
+        && (tok[0] == 'F' || tok[0] == 'C')) {
+        w.unit = tok[0];
+        tok = strtok_r(NULL, "|", &save);
+    }
+    if (tok != NULL) city = tok;
+    w.valid = true;
+    w.temp = v[0];
+    w.hi = v[1];
+    w.lo = v[2];
+    w.feels = v[3];
+    snprintf(w.city, sizeof(w.city), "%s", city);
+    portENTER_CRITICAL(&s_amb_mux);
+    s_wx = w;
+    portEXIT_CRITICAL(&s_amb_mux);
+    ESP_LOGI(TAG, "wx %d/%d/%d %d %c \"%s\"", w.code, w.temp, w.hi,
+             w.feels, w.unit, w.city);
+}
+
+static bool amb_clock_now(amb_clock *out)
+{
+    int64_t epoch, sync;
+    int32_t tz, fmt;
+    bool set;
+    portENTER_CRITICAL(&s_amb_mux);
+    epoch = s_time_epoch;
+    sync = s_time_sync_us;
+    tz = s_time_tz_min;
+    fmt = s_time_fmt24;
+    set = s_time_set;
+    portEXIT_CRITICAL(&s_amb_mux);
+    amb_clock_default(out);
+    if (!set) return false;
+    int64_t now = esp_timer_get_time();
+    out->local_epoch = epoch + (now - sync) / 1000000LL + (int64_t)tz * 60;
+    out->fmt24 = fmt;
+    return true;
+}
+
+static void amb_wx_get(amb_wx *out)
+{
+    portENTER_CRITICAL(&s_amb_mux);
+    *out = s_wx;
+    portEXIT_CRITICAL(&s_amb_mux);
+}
+
+static const char *state_status_label(int state)
+{
+    switch (state) {
+    case PIP_APPROVAL: return "APPROVAL NEEDED";
+    case PIP_MCQ:      return "QUESTION WAITING";
+    case PIP_HUB:      return "NO LINK";
+    case PIP_OFFLINE:  return "OFFLINE";
+    case PIP_SLEEP:
+    case PIP_IDLE:     return "AGENT IDLE";
+    case PIP_THINKING: return "THINKING";
+    case PIP_READ:     return "READING";
+    case PIP_SEARCH:   return "SEARCHING";
+    case PIP_WAIT:     return "WAITING";
+    case PIP_CURIOUS:  return "CURIOUS";
+    case PIP_WAKE:     return "WAKING";
+    case PIP_DONE:     return "DONE";
+    case PIP_RETRY:    return "RETRYING";
+    default:           return "AGENT WORKING";
+    }
+}
+
+static r_rgb state_status_ink(int state)
+{
+    switch (state) {
+    case PIP_APPROVAL: return (r_rgb){ 241, 189, 104 };
+    case PIP_MCQ:      return (r_rgb){ 255, 145, 184 };
+    case PIP_WAIT:
+    case PIP_RETRY:    return (r_rgb){ 228, 187, 122 };
+    case PIP_DONE:     return (r_rgb){ 165, 230, 155 };
+    case PIP_CURIOUS:  return (r_rgb){ 189, 164, 245 };
+    case PIP_HUB:
+    case PIP_OFFLINE:  return (r_rgb){ 147, 165, 177 };
+    case PIP_SLEEP:
+    case PIP_IDLE:     return (r_rgb){ 144, 223, 209 };
+    default:           return (r_rgb){ 100, 224, 236 };
+    }
+}
+
 /* One line parser for USB and Wi-Fi. It runs on whichever transport task
  * received the line, so a COLOR and an ANIM never interleave. Returns a reply
  * ("PONG") or NULL. */
 const char *cue9_handle_line(char *line)
 {
+    if (strncmp(line, "TIME ", 5) == 0) {
+        handle_time(line + 5);
+        return NULL;
+    }
+    if (strncmp(line, "WX ", 3) == 0) {
+        handle_wx(line + 3);
+        return NULL;
+    }
     s_last_cmd_us = esp_timer_get_time();
     if (strncmp(line, "COLOR ", 6) == 0) {
         char *name = line + 6;
@@ -558,6 +775,13 @@ const char *cue9_handle_line(char *line)
             ESP_LOGI(TAG, "cmd anim=%s", pip_state_names[idx]);
         } else {
             ESP_LOGW(TAG, "cmd bad anim %s", line + 5);
+        }
+    } else if (strncmp(line, "PAGE ", 5) == 0) {
+        int v = atoi(line + 5);
+        if (v >= 0 && v <= 2) {
+            s_page_cmd = v;
+            s_page_cmd_seq++;
+            ESP_LOGI(TAG, "cmd page=%d", v);
         }
     } else if (strncmp(line, "AGENTS ", 7) == 0) {
         int v = atoi(line + 7);
@@ -670,10 +894,28 @@ static void build_worker(void *arg)
         s_opt.agents = s_agent_count;
         r_dl_reset(&s_dl);
         int64_t a = esp_timer_get_time();
-        pip_scene_frame(&s_dl, &s_scene, s_build_state, s_build_t, s_build_dt, &s_opt);
+        float anim_t = (float)((double)a / 1000000.0);
+        if (s_build_page == AMB_PAGE_LIVE) {
+            pip_scene_frame(&s_dl, &s_scene, s_build_state, s_build_t, s_build_dt, &s_opt);
+        } else if (s_build_page == AMB_PAGE_CLOCK) {
+            amb_clock clk;
+            amb_wx wx;
+            bool have = amb_clock_now(&clk);
+            amb_wx_get(&wx);
+            amb_clock_frame(&s_dl, &clk, have, &wx, state_status_label(s_build_state),
+                            state_status_ink(s_build_state), AMB_PAGE_CLOCK, anim_t);
+        } else {
+            amb_wx wx;
+            amb_wx_get(&wx);
+            amb_weather_frame(&s_dl, &wx, AMB_PAGE_WEATHER, anim_t);
+        }
         gauge_state g;
         gauge_get(&g);
-        draw_battery(&s_dl, &g);
+        /* The clock's ring owns the top edge, so its battery sits inside the
+         * ring. Weather's city label owns that space, so it goes bare. */
+        if (s_build_page != AMB_PAGE_WEATHER) {
+            draw_battery(&s_dl, &g, s_build_page == AMB_PAGE_CLOCK ? 44.0f : 22.0f);
+        }
         s_build_us = esp_timer_get_time() - a;
         s_build_done = true;
     }
@@ -701,6 +943,7 @@ void app_main(void)
 
     /* Read the gauge before powering the panel: a nearly empty cell must not
      * be asked to carry a full boot only to brown out and reboot. */
+    s_i2c_mux = xSemaphoreCreateMutex();
     gauge_init();
     gauge_state boot_gauge;
     gauge_get(&boot_gauge);
@@ -724,25 +967,22 @@ void app_main(void)
              (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
 
     size_t body_bytes = (size_t)BODY_ROWS * 360 * sizeof(uint16_t);
-    size_t bottom_bytes = (size_t)BOTTOM_ROWS * 360 * sizeof(uint16_t);
-    /* The body is 230 KB; keep it in PSRAM so the Wi-Fi/TLS stacks have
-     * internal RAM. The bottom strip stays internal for its small DMA. */
+    /* The body is 253 KB; keep it in PSRAM so the Wi-Fi/TLS stacks have
+     * internal RAM. Every row is drawn: the ambient pages use the bezel. */
     s_body = heap_caps_malloc(body_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA);
     if (s_body == NULL) s_body = heap_caps_malloc(body_bytes, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
-    s_bottom = heap_caps_malloc(bottom_bytes, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
     s_stage = heap_caps_malloc((size_t)STAGE_ROWS * 360 * sizeof(uint16_t),
                                MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
-    if (!s_body || !s_bottom || !s_stage) {
-        ESP_LOGE(TAG, "buffer alloc failed body=%p bottom=%p internal=%u largest=%u",
-                 (void *)s_body, (void *)s_bottom,
+    if (!s_body || !s_stage) {
+        ESP_LOGE(TAG, "buffer alloc failed body=%p internal=%u largest=%u",
+                 (void *)s_body,
                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
         while (1) vTaskDelay(pdMS_TO_TICKS(1000));
     }
     memset(s_body, 0, body_bytes);
-    memset(s_bottom, 0, bottom_bytes);
-    ESP_LOGI(TAG, "body %d rows + bottom %d rows, free internal=%u largest=%u",
-             BODY_ROWS, BOTTOM_ROWS,
+    ESP_LOGI(TAG, "body %d rows, free internal=%u largest=%u",
+             BODY_ROWS,
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
              (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
 
@@ -766,21 +1006,12 @@ void app_main(void)
     cue9_wifi_start();
     xTaskCreatePinnedToCore(cmd_task, "pip_cmd", 4096, NULL, 4, NULL, 0);
     xTaskCreatePinnedToCore(log_gate_task, "pip_log", 2048, NULL, 2, NULL, 0);
+    xTaskCreatePinnedToCore(touch_task, "pip_touch", 3072, NULL, 3, NULL, 0);
 
+    /* The first body flush in the frame loop primes the DMA; nothing on the
+     * panel is drawn before that. s_done starts at 0 and the TE wait before
+     * each write covers the panel's first field. */
     s_done = 0;
-    te_wait();
-    {
-        r_rgb bg = s_opt.has_bg ? s_opt.bg : (r_rgb){ 5, 10, 14 };
-        r_target bottom_target = {
-            .px = s_bottom,
-            .stride = 360,
-            .win = { .x0 = 0, .y0 = BODY_ROWS, .x1 = 360, .y1 = 360 },
-        };
-        r_clear(&bottom_target, r_rgb565(bg));
-        s_bottom_bg = r_rgb565(bg);
-    }
-    esp_lcd_panel_draw_bitmap(s_panel, 0, BODY_ROWS, 360, 360, s_bottom);
-    while (s_done < 1) vTaskDelay(1);
 
     BaseType_t ok = xTaskCreatePinnedToCore(build_worker, "pip_build", 8192, NULL, 5,
                                             &s_build_task, 1);
@@ -805,6 +1036,16 @@ void app_main(void)
     uint32_t agent_rng = 0x9e3779b9u;
     bool glow_on = true;
     int frame = 0;
+    int page = AMB_PAGE_LIVE;
+    int page_seen = -1;
+    int resume_page = AMB_PAGE_LIVE;
+    bool auto_done = false;
+    bool forced_live = false;
+    bool was_quiet = false;
+    bool was_urgent = false;
+    const char *last_clock_label = NULL;
+    int64_t quiet_since = 0;
+    uint32_t page_cmd_seen = 0;
     int64_t acc_render = 0, acc_clear = 0, acc_flush = 0, acc_wait_build = 0;
     int64_t next = esp_timer_get_time();
     int64_t last_frame = next;
@@ -865,17 +1106,6 @@ void app_main(void)
             .win = { .x0 = 0, .y0 = 0, .x1 = 360, .y1 = BODY_ROWS },
         };
         uint16_t bg565 = r_rgb565(s_dl.pal.bg);
-        bool bottom_dirty = false;
-        if (bg565 != s_bottom_bg) {
-            r_target bottom_target = {
-                .px = s_bottom,
-                .stride = 360,
-                .win = { .x0 = 0, .y0 = BODY_ROWS, .x1 = 360, .y1 = 360 },
-            };
-            r_clear(&bottom_target, bg565);
-            s_bottom_bg = bg565;
-            bottom_dirty = true;
-        }
         int64_t a = esp_timer_get_time();
         r_clear(&target, bg565);
         int64_t a2 = esp_timer_get_time();
@@ -946,6 +1176,75 @@ void app_main(void)
         if (ns != state || reset) color_commit(ns);
         color_bind(ns);
 
+        /* Pages: live face, clock, weather. A swipe or PAGE moves between
+         * them and stays put: only an approval or question may take the
+         * screen. When that cue clears, the page it interrupted comes back. */
+        uint32_t page_cmd_now = s_page_cmd_seq;
+        if (page_cmd_now != page_cmd_seen) {
+            page_cmd_seen = page_cmd_now;
+            if (s_page_cmd >= 0) {
+                page = s_page_cmd;
+                auto_done = true;
+                forced_live = false;   /* the user took the page back */
+            }
+        }
+        int nav = s_touch_nav;
+        if (nav != 0) {
+            s_touch_nav = 0;
+            page = (page + nav + 3) % 3;
+            auto_done = true;
+            forced_live = false;
+        }
+        bool quiet = (ns == PIP_SLEEP || ns == PIP_HUB);
+        if (quiet && !was_quiet) {
+            quiet_since = now;
+            auto_done = false;
+        }
+        if (!quiet) quiet_since = 0;
+        was_quiet = quiet;
+        if (quiet && !auto_done && !forced_live && quiet_since != 0
+            && now - quiet_since >= 60000000LL) {
+            page = AMB_PAGE_CLOCK;
+            auto_done = true;
+            ESP_LOGI(TAG, "auto clock after 60s quiet");
+        }
+        bool urgent = (ns == PIP_APPROVAL || ns == PIP_MCQ);
+        if (urgent && !was_urgent) {
+            if (!forced_live) {
+                resume_page = page;
+                forced_live = true;
+            }
+            if (page != AMB_PAGE_LIVE) {
+                ESP_LOGI(TAG, "urgent cue: live (was page %d)", resume_page);
+                page = AMB_PAGE_LIVE;
+            }
+        } else if (!urgent && was_urgent) {
+            if (forced_live) {
+                page = resume_page;
+                forced_live = false;
+                ESP_LOGI(TAG, "urgent cleared: back to page %d", page);
+            }
+        }
+        was_urgent = urgent;
+        if (page == AMB_PAGE_CLOCK) {
+            const char *label = state_status_label(ns);
+            if (label != last_clock_label) {
+                last_clock_label = label;
+                ESP_LOGI(TAG, "clock status %s", label);
+            }
+        } else {
+            last_clock_label = NULL;
+        }
+        if (page != page_seen) {
+            ESP_LOGI(TAG, "page %d (%s)", page,
+                     page == AMB_PAGE_LIVE ? "live" : page == AMB_PAGE_CLOCK ? "clock" : "weather");
+            s_dl.pal.bg = (page == AMB_PAGE_LIVE)
+                              ? (s_opt.has_bg ? s_opt.bg : (r_rgb){ 5, 10, 14 })
+                              : amb_page_bg(page);
+            page_seen = page;
+        }
+
+        s_build_page = page;
         s_build_state = ns;
         s_build_t = nt;
         s_build_dt = dt;
@@ -955,10 +1254,6 @@ void app_main(void)
 
         int64_t f0 = esp_timer_get_time();
         flush_body();
-        if (bottom_dirty) {
-            te_wait();
-            draw_and_wait(0, BODY_ROWS, 360, 360, s_bottom);
-        }
         int64_t f1 = esp_timer_get_time();
         acc_flush += f1 - f0;
 

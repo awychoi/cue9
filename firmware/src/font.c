@@ -13,8 +13,8 @@
 #include "raster.h"
 #include "font_baked.h"
 
-#define F_MAX_W 32
-#define F_MAX_H 32
+#define F_MAX_W 80
+#define F_MAX_H 80
 
 static uint8_t g_a8[F_MAX_W * F_MAX_H];
 
@@ -25,6 +25,8 @@ static const r_font_glyph_meta *meta_for(int font, uint16_t cp) {
   if (font >= R_FONT_NFACE) font = R_FONT_NFACE - 1;
   f = &r_font_faces[font];
   if (cp == 0x2026u) gid = 95;
+  else if (cp == 0x00B0u) gid = 96;
+  else if (cp == 0x00B7u) gid = 97;
   else {
     if (cp < 32u || cp > 126u) cp = (uint16_t)'?';
     gid = (int)cp - 32;

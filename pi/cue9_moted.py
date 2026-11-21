@@ -10,12 +10,18 @@ client is attached. When the Mac goes away the heartbeat stops and the mote
 falls back to its own hub scene, so a stale face never claims the agent is
 still working.
 
+The Pi also feeds the mote's ambient pages: TIME from its own NTP-synced clock
+and WX from Open-Meteo. Those lines are pushed while the mote is connected,
+with or without a Mac attached. They are deliberately not cached, not replayed
+and not counted as client liveness.
+
 stdlib only. Run it as a user service; see cue9_pi_setup.sh.
 """
 
 from __future__ import annotations
 
 import argparse
+import datetime
 import json
 import logging
 import os
@@ -25,6 +31,13 @@ import ssl
 import sys
 import threading
 import time
+import urllib.parse
+import urllib.request
+
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:   # very old Python; the Pi keeps its own zone
+    ZoneInfo = None
 
 log = logging.getLogger("cue9-moted")
 
@@ -38,6 +51,264 @@ DEFAULTS = {
     "heartbeat_seconds": 2.0,
 }
 PATH_KEYS = ("cert", "key", "ca", "sock")
+
+AMBIENT_DEFAULTS = {
+    "enabled": True,
+    "city": "",            # empty: derive from the Pi's timezone
+    "lat": None,           # number, or geocoded from city
+    "lon": None,
+    "units": "auto",       # auto | celsius | fahrenheit
+    "clock": 12,           # 12 or 24
+    "timezone": "",        # IANA name; empty = the Pi's own zone
+    "time_seconds": 15.0,  # TIME cadence while the mote is connected
+    "weather_seconds": 900.0,
+}
+
+WEATHER_URL = "https://api.open-meteo.com/v1/forecast"
+GEOCODE_URL = "https://geocoding-api.open-meteo.com/v1/search"
+
+
+def city_from_timezone(tz: str) -> str:
+    """America/New_York -> New York; a bare UTC-like zone has no city."""
+    name = (tz or "").rsplit("/", 1)[-1].replace("_", " ").strip()
+    return "" if name.lower() in {"utc", "gmt", "etc", "unknown"} else name
+
+
+def system_timezone() -> str:
+    """The IANA zone, which time.tzname does not give (it gives EST/EDT)."""
+    try:
+        with open("/etc/timezone", "r", encoding="utf-8") as fh:
+            name = fh.read().strip()
+        if name:
+            return name
+    except OSError:
+        pass
+    return os.environ.get("TZ", "")
+
+
+def condition_for(code: int) -> str:
+    """WMO weather code -> one of the four icons the mote draws."""
+    if code == 0:
+        return "sunny"
+    if code in (71, 73, 75, 77, 85, 86):
+        return "snow"
+    if 51 <= code <= 67 or 80 <= code <= 82 or 95 <= code <= 99:
+        return "rain"
+    return "partly"   # 1-3 cloud, 45/48 fog, and anything unrecognised
+
+
+class Ambient:
+    """Pushes TIME and WX to the mote. Runs whether or not a Mac is attached."""
+
+    def __init__(self, service: "Service"):
+        cfg = dict(AMBIENT_DEFAULTS)
+        loaded = service.cfg.get("ambient")
+        if isinstance(loaded, dict):
+            cfg.update(loaded)
+        self.service = service
+        self.cfg = cfg
+        self.enabled = bool(cfg.get("enabled", True))
+        self.city = str(cfg.get("city") or "").strip()
+        self.lat = cfg.get("lat")
+        self.lon = cfg.get("lon")
+        self.tz_name = str(cfg.get("timezone") or "").strip()
+        self.lock = threading.RLock()
+        self.units = str(cfg.get("units") or "auto").lower()
+        try:
+            self.clock = 24 if int(cfg.get("clock", 12)) == 24 else 12
+        except (TypeError, ValueError):
+            self.clock = 12
+        self.force_time = False
+        self.force_weather = False
+        self.wx_line = None
+        self._resolved = False
+
+    # ---- scheduling ---------------------------------------------------------
+
+    def poke(self) -> None:
+        """Send now: the mote just (re)connected."""
+        self.force_time = True
+        self.force_weather = True
+
+    def start(self) -> None:
+        if not self.enabled:
+            log.info("ambient off")
+            return
+        threading.Thread(target=self._time_loop, name="ambient-time", daemon=True).start()
+        threading.Thread(target=self._weather_loop, name="ambient-wx", daemon=True).start()
+
+    def _units(self) -> str:
+        if self.units in ("celsius", "fahrenheit"):
+            return self.units
+        return "fahrenheit" if system_timezone().startswith("America/") else "celsius"
+
+    def _offset_minutes(self) -> int:
+        zone = None
+        if self.tz_name and ZoneInfo is not None:
+            try:
+                zone = ZoneInfo(self.tz_name)
+            except Exception:
+                zone = None
+        when = datetime.datetime.now(zone) if zone is not None else datetime.datetime.now().astimezone()
+        offset = when.utcoffset()
+        return int(offset.total_seconds() // 60) if offset is not None else 0
+
+    def _time_line(self) -> str:
+        now = time.time()
+        return f"TIME {int(now)} {self._offset_minutes()} {self.clock}"
+
+    def _time_loop(self) -> None:
+        interval = max(5.0, float(self.cfg.get("time_seconds") or 15.0))
+        last = -1e9
+        while not self.service.stop.wait(0.5):
+            if not self.service.mote_connected:
+                continue
+            now = time.monotonic()
+            if not self.force_time and now - last < interval:
+                continue
+            self.force_time = False
+            if self.service.send_mote(self._time_line(), remember=False):
+                last = now
+
+    def _weather_loop(self) -> None:
+        interval = max(120.0, float(self.cfg.get("weather_seconds") or 900.0))
+        last = -1e9
+        while not self.service.stop.wait(1.0):
+            if not self.service.mote_connected:
+                continue
+            now = time.monotonic()
+            if not self.force_weather and now - last < interval:
+                continue
+            self.force_weather = False
+            line = self._fetch_line()
+            if line is not None and self.service.send_mote(line, remember=False):
+                self.wx_line = line
+                last = now
+            elif line is None:
+                last = now   # a failed fetch waits a full interval; no hammering
+
+    # ---- config from the app ------------------------------------------------
+
+    def to_dict(self) -> dict:
+        with self.lock:
+            return {
+                "enabled": self.enabled,
+                "timezone": self.tz_name,
+                "city": self.city,
+                "lat": self.lat,
+                "lon": self.lon,
+                "units": self.units,
+                "clock": self.clock,
+                "time_seconds": self.cfg.get("time_seconds", 15.0),
+                "weather_seconds": self.cfg.get("weather_seconds", 900.0),
+            }
+
+    def snapshot(self) -> dict:
+        data = self.to_dict()
+        data["pi_zone"] = system_timezone()
+        data["units_effective"] = self._units()
+        return data
+
+    def apply(self, payload: dict) -> None:
+        """Settings from the cue9 app. Persisted in moted.json, applied live."""
+        if not isinstance(payload, dict):
+            raise ValueError("ambient payload must be an object")
+        with self.lock:
+            if "timezone" in payload:
+                name = str(payload.get("timezone") or "").strip()
+                if name:
+                    if ZoneInfo is None:
+                        raise ValueError("this Python has no zoneinfo")
+                    try:
+                        ZoneInfo(name)
+                    except Exception:
+                        raise ValueError(f"unknown timezone {name!r}")
+                self.tz_name = name
+            if "city" in payload:
+                self.city = str(payload.get("city") or "").strip()[:40]
+            if "lat" in payload or "lon" in payload:
+                lat, lon = payload.get("lat"), payload.get("lon")
+                if lat is None or lon is None:
+                    self.lat = self.lon = None
+                else:
+                    lat, lon = float(lat), float(lon)
+                    if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
+                        raise ValueError("coordinates out of range")
+                    self.lat, self.lon = lat, lon
+            if "units" in payload:
+                unit = str(payload.get("units") or "").lower()
+                if unit in ("f", "fahrenheit"):
+                    self.units = "fahrenheit"
+                elif unit in ("c", "celsius"):
+                    self.units = "celsius"
+                elif unit == "auto":
+                    self.units = "auto"
+                else:
+                    raise ValueError("units must be fahrenheit or celsius")
+            if "clock" in payload:
+                clock = int(payload["clock"])
+                if clock not in (12, 24):
+                    raise ValueError("clock must be 12 or 24")
+                self.clock = clock
+        self.force_time = True
+        self.force_weather = True
+
+    # ---- weather ------------------------------------------------------------
+
+    def _location(self) -> tuple[float, float, str] | None:
+        if self.lat is not None and self.lon is not None:
+            try:
+                return float(self.lat), float(self.lon), self.city
+            except (TypeError, ValueError):
+                pass
+        city = self.city or city_from_timezone(system_timezone())
+        if not city:
+            return None
+        query = urllib.parse.urlencode({"name": city, "count": 1, "language": "en", "format": "json"})
+        with urllib.request.urlopen(f"{GEOCODE_URL}?{query}", timeout=8) as resp:
+            data = json.load(resp)
+        results = data.get("results") or []
+        if not results:
+            log.warning("weather: no place found for %r", city)
+            return None
+        hit = results[0]
+        with self.lock:
+            self.lat = hit.get("latitude")
+            self.lon = hit.get("longitude")
+            self.city = hit.get("name") or city
+            return float(self.lat), float(self.lon), self.city
+
+    def _fetch_line(self) -> str | None:
+        try:
+            place = self._location()
+            if place is None:
+                return None
+            lat, lon, label = place
+            query = urllib.parse.urlencode({
+                "latitude": lat,
+                "longitude": lon,
+                "current": "temperature_2m,apparent_temperature,weather_code",
+                "daily": "temperature_2m_max,temperature_2m_min,weather_code",
+                "forecast_days": 1,
+                "timezone": "auto",
+                "temperature_unit": self._units(),
+            })
+            with urllib.request.urlopen(f"{WEATHER_URL}?{query}", timeout=8) as resp:
+                data = json.load(resp)
+            cur = data["current"]
+            daily = data["daily"]
+            temp = int(round(float(cur["temperature_2m"])))
+            feels = int(round(float(cur["apparent_temperature"])))
+            hi = int(round(float(daily["temperature_2m_max"][0])))
+            lo = int(round(float(daily["temperature_2m_min"][0])))
+            code = int(cur.get("weather_code", 0))
+            city = "".join(c for c in label.upper() if 32 <= ord(c) < 127)[:18].strip()
+            unit = "F" if self._units() == "fahrenheit" else "C"
+            return f"WX {condition_for(code)}|{temp}|{hi}|{lo}|{feels}|{unit}|{city}"
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            log.warning("weather fetch failed: %s", exc)
+            return None
+
 
 
 def default_config_path() -> str:
@@ -71,8 +342,9 @@ def close_quietly(sock) -> None:
 
 
 class Service:
-    def __init__(self, cfg: dict):
+    def __init__(self, cfg: dict, cfg_path: str = ""):
         self.cfg = cfg
+        self.cfg_path = cfg_path
         self.started = time.time()
         self.stop = threading.Event()
 
@@ -93,6 +365,7 @@ class Service:
         self.last_heartbeat = 0.0
         self._tcp = None
         self._unix = None
+        self.ambient = Ambient(self)
 
     # ---- outbound -----------------------------------------------------------
 
@@ -107,6 +380,7 @@ class Service:
             "clients": self.client_count(),
             "error": self.error,
             "uptime": round(time.time() - self.started, 1),
+            "ambient": self.ambient.snapshot(),
         }
 
     def client_count(self) -> int:
@@ -118,6 +392,18 @@ class Service:
 
     def send_status(self) -> None:
         self.broadcast(self.status())
+
+    def save_config(self) -> None:
+        """Write the ambient block back to moted.json so it survives restarts."""
+        if not self.cfg_path:
+            return
+        data = dict(self.cfg)
+        data["ambient"] = self.ambient.to_dict()
+        tmp = self.cfg_path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, indent=2)
+            fh.write("\n")
+        os.replace(tmp, self.cfg_path)
 
     def broadcast(self, obj: dict) -> None:
         data = self._json_bytes(obj)
@@ -216,6 +502,7 @@ class Service:
         self.send_status()
         if self.client_count() > 0:
             self.replay()
+        self.ambient.poke()
         threading.Thread(target=self._mote_reader, args=(tls,), daemon=True).start()
 
     def _drop(self, tls, reason: str | None = None) -> None:
@@ -291,9 +578,24 @@ class Service:
 
     # ---- attach clients -----------------------------------------------------
 
-    def handle_client_line(self, line: str) -> None:
+    def handle_client_line(self, line: str, conn=None) -> None:
         line = line.strip()
         if not line:
+            return
+        if line.startswith("AMBIENT "):
+            reply = {"type": "ambient", "ok": False}
+            try:
+                self.ambient.apply(json.loads(line[8:]))
+                self.save_config()
+                reply["ok"] = True
+                reply["ambient"] = self.ambient.snapshot()
+            except (ValueError, TypeError, OSError) as exc:
+                reply["error"] = str(exc)
+            if conn is not None:
+                try:
+                    conn.sendall(self._json_bytes(reply))
+                except OSError:
+                    pass
             return
         if line == "ALIVE":
             self.last_client_alive = time.monotonic()
@@ -316,7 +618,7 @@ class Service:
                     continue
                 cmd = obj.get("cmd")
                 if isinstance(cmd, str):
-                    self.handle_client_line(cmd)
+                    self.handle_client_line(cmd, conn)
         except OSError:
             pass
         finally:
@@ -377,6 +679,7 @@ class Service:
         threading.Thread(target=self._mote_accept_loop, daemon=True).start()
         threading.Thread(target=self._client_accept_loop, daemon=True).start()
         threading.Thread(target=self._heartbeat_loop, daemon=True).start()
+        self.ambient.start()
 
         def _stop(_signum, _frame):
             self.stop.set()
@@ -425,7 +728,7 @@ def main() -> int:
     if not os.path.exists(cfg["cert"]) or not os.path.exists(cfg["key"]):
         log.error("missing TLS material: %s / %s", cfg["cert"], cfg["key"])
         return 2
-    return Service(cfg).run()
+    return Service(cfg, os.path.expanduser(args.config)).run()
 
 
 if __name__ == "__main__":

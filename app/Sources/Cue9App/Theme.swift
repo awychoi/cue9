@@ -201,9 +201,13 @@ struct WindowAppearanceSetter: NSViewRepresentable {
     private func apply(to view: NSView) {
         DispatchQueue.main.async {
             guard let window = view.window else { return }
-            let nsAppearance = appearance.nsAppearance
-            window.appearance = nsAppearance
-            window.contentView?.appearance = nsAppearance
+            let wanted = appearance.nsAppearance
+            // Only touch the window when it actually changes. Re-assigning the
+            // same appearance (or the content view's) rebuilds the hosting
+            // view and snaps scrolled pages back to the top.
+            if window.appearance != wanted {
+                window.appearance = wanted
+            }
         }
     }
 }

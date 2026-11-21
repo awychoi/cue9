@@ -29,6 +29,16 @@ struct DeviceView: View {
         DSHLauncher.isInstalled || model.dshOnline
     }
 
+    /// The Pi that feeds the ambient pages. Only shown once the link is set up
+    /// and the app's restricted key exists.
+    private var ambientTarget: String? {
+        guard FileManager.default.fileExists(atPath: PISetup.runKeyPath) else { return nil }
+        if let summary = MoteProvisioning.loadSummary(), summary.bridgeTarget.contains("@") {
+            return summary.bridgeTarget
+        }
+        return model.linkHost.contains("@") ? model.linkHost : nil
+    }
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
@@ -41,6 +51,9 @@ struct DeviceView: View {
 
                 pluginCard
                 wirelessCard
+                if let ambientTarget {
+                    AmbientCard(target: ambientTarget, keyPath: PISetup.runKeyPath)
+                }
                 firmwareCard
                 advancedCard
             }

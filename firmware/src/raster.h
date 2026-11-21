@@ -94,7 +94,7 @@ typedef struct {
                           * Use only for keyboard body, ring track, job arcs. */
 
 enum { R_FILL = 0, R_GLOW = 1, R_TEXT = 2, R_SPRITE = 3 };
-enum { R_FONT_10 = 0, R_FONT_14 = 1, R_FONT_18 = 2, R_FONT_22 = 3 }; /* baked px em */
+enum { R_FONT_10 = 0, R_FONT_14 = 1, R_FONT_18 = 2, R_FONT_22 = 3, R_FONT_64 = 4 }; /* baked px em */
 enum { R_ALIGN_L = 0, R_ALIGN_C = 1, R_ALIGN_R = 2 };
 
 typedef struct {           /* ~14.9 KB; allocate statically, never on the stack */

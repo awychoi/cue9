@@ -84,18 +84,52 @@ chmod 600 "$TLS"/*.key
 chmod 644 "$TLS"/*.crt
 
 "$PY" - "$CONF/moted.json" "$BIND" "$PORT" "$TLS" "$SOCK" <<'PY'
-import json, sys
+import json, os, sys
 path, bind, port, tls, sock = sys.argv[1:6]
+# Re-running setup must not wipe the weather settings; keep unknown keys and
+# only refresh the link fields. Ambient defaults can come from the environment
+# so a fleet script can pass a city without editing JSON on the Pi.
+try:
+    with open(path, encoding="utf-8") as fh:
+        cfg = json.load(fh)
+    if not isinstance(cfg, dict):
+        cfg = {}
+except (OSError, ValueError):
+    cfg = {}
+cfg.update({
+    "bind": bind,
+    "port": int(port),
+    "cert": tls + "/server.crt",
+    "key": tls + "/server.key",
+    "ca": tls + "/ca.crt",
+    "sock": sock,
+    "heartbeat_seconds": 2.0,
+})
+amb = cfg.get("ambient")
+if not isinstance(amb, dict):
+    amb = {}
+amb.setdefault("enabled", True)
+amb.setdefault("city", "")
+amb.setdefault("lat", None)
+amb.setdefault("lon", None)
+amb.setdefault("units", "auto")
+amb.setdefault("clock", 12)
+amb.setdefault("timezone", "")
+amb.setdefault("time_seconds", 15.0)
+amb.setdefault("weather_seconds", 900.0)
+for env, key, cast in (
+    ("CUE9_CITY", "city", str),
+    ("CUE9_LAT", "lat", float),
+    ("CUE9_LON", "lon", float),
+    ("CUE9_UNITS", "units", str),
+    ("CUE9_CLOCK", "clock", int),
+    ("CUE9_TIMEZONE", "timezone", str),
+):
+    if os.environ.get(env):
+        amb[key] = cast(os.environ[env])
+cfg["ambient"] = amb
 with open(path, "w", encoding="utf-8") as fh:
-    json.dump({
-        "bind": bind,
-        "port": int(port),
-        "cert": tls + "/server.crt",
-        "key": tls + "/server.key",
-        "ca": tls + "/ca.crt",
-        "sock": sock,
-        "heartbeat_seconds": 2.0,
-    }, fh, indent=2)
+    json.dump(cfg, fh, indent=2)
     fh.write("\n")
 PY
 

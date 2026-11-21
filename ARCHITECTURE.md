@@ -37,6 +37,7 @@ AppModel
 | `app/Sources/Cue9App/PreviewEngine.swift` | Swift bridge to the C renderer; 30 fps frame loop |
 | `app/Sources/Cue9App/PreviewSurface.swift` | `NSViewRepresentable` that displays frames |
 | `app/Sources/Cue9Preview/` | C face renderer and baked font |
+| `firmware/src/ambient.c` | Clock and weather pages, their own palettes and layout |
 | `app/Sources/Cue9App/FirmwareFlasher.swift` | Port scan, esptool invocation, flash log |
 | `app/Sources/Cue9App/Snapshot.swift` | Headless renderer used for screenshots |
 | `app/Sources/Cue9App/Cue9App.swift` | App delegate, window, menu, snapshot flags |
@@ -90,6 +91,34 @@ stage.
 - Recent cues are recorded locally when the action or animation changes. The list keeps six entries and is stored in `history.json`; it is not fetched from DSH.
 - `lastSaved` is the small “Saved” confirmation in the Mote editor.
 
+## Ambient pages
+
+Clock and weather are device pages, not Pip states. The mote holds three pages: the live face,
+the clock, and the weather. A horizontal swipe on the touch controller steps through them, and
+`PAGE <0|1|2>` does the same from the host link. While a page is showing, the live scene keeps
+running underneath, so swiping back is seamless.
+
+The clock arrives once per quiet episode: after 60 s in `sleep` or `hub`, the mote shows it without
+a cue. A swipe ends the auto step for that episode. The chosen page otherwise stays put: work, done
+and idle cues never pull it back. Only an approval or question takes the screen; the page it
+interrupted is remembered and restored when that cue clears. A swipe during the cue cancels the
+restore.
+
+The Pi feeds the pages. `cue9-moted` sends `TIME <epoch> <tz_offset_min> <12|24>` every 15 s and
+`WX <icon>|<temp>|<hi>|<lo>|<feels>|<F|C>|<city>` every 15 minutes (Open-Meteo). The offset comes
+from the app's chosen zone when there is one, otherwise from the Pi's own timezone. The city comes
+from `moted.json`, or from the Pi's own timezone; `cue9_pi_setup.sh` keeps that block when it
+re-runs. The weather arc maps the day's low and high onto the bezel on a fixed scale (10–100 °F,
+−15–40 °C), with a dot at the current temperature. The mote has no RTC: it counts from the last
+`TIME` and boots at 1970 until a sync arrives. Ambient lines are data, not agent state, so they
+never refresh the Mac liveness clock and never appear in the attach replay.
+
+The app's Device page has an **Ambient** card: a timezone picker, a city search (Open-Meteo's
+geocoder), units, and 12/24-hour format. It reads the Pi's block from the bridge status line and
+saves with `AMBIENT <json>` over the same restricted SSH key the plugin uses. `cue9-moted` validates
+it, applies it live, writes `moted.json`, and acknowledges only to that attach connection. The last
+confirmed settings are cached locally, so the card still opens with them when the Pi is away.
+
 ## Preview renderer
 
 `Cue9Preview` is a small C drawing library. `PreviewEngine` owns it on a serial queue and renders a 360×360 RGB565 frame at 30 fps. Swift converts the frame to RGBA and hands it to `PreviewSurface` (`NSImageView`), clipped to the screen circle.
@@ -108,7 +137,7 @@ Before flashing, `AppModel.flashFirmware()` releases the DSH USB bridge and wait
 
 The firmware takes `COLOR <animation> <hex>` and `BG <animation> <hex>` over USB. Both are staged and applied when that animation next starts. They live in RAM; the plugin re-sends the full palette and background set whenever the bridge connects.
 
-The battery glyph uses the same colour for its shell and bars (green, yellow, red), and a valid battery always shows at least one red bar. At 5 % or below with no charge current, the firmware drops the panel rail and deep-sleeps for 30 s instead of booting into a brown-out loop. After a low-battery sleep it stays dark across retries until it sees charge current or the gauge is above 10 %, then it boots normally.
+The battery glyph uses the same colour for its shell and bars (green, yellow, red), and a valid battery always shows at least one red bar. It sits at the top edge on the live face and inside the seconds ring on the clock page; the weather page goes without. The body buffer covers all 360 rows, so the clock's ring and the weather's arc can use the bezel. The baked font carries a 64 px face for the time and temperature, plus U+00B0 and U+00B7. At 5 % or below with no charge current, the firmware drops the panel rail and deep-sleeps for 30 s instead of booting into a brown-out loop. After a low-battery sleep it stays dark across retries until it sees charge current or the gauge is above 10 %, then it boots normally.
 
 ## Build and assets
 
