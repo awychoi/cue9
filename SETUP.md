@@ -65,6 +65,7 @@ The mote can reach DSH through a Raspberry Pi instead of USB.
 2. Enter the Pi's SSH host (`pi@192.168.1.x`) and its password once, or install your key first.
 3. Connect the mote over USB and press **Provision mote…**. Enter the Wi-Fi network and password.
 4. The app flashes the `cue9cfg` partition, switches the plugin to Wi-Fi, and the mote dials the Pi.
+5. The clock and weather pages come from the Pi. Open **Device → Ambient** to set the timezone, city, °F/°C, and 12/24-hour clock, then **Save to Pi**.
 
 The Pi service (`cue9-moted`) keeps the mTLS link; `~/.dsh/cue9/link.json` stores
 the transport. The plugin runs `caffeinate` while loaded, so the Mac stays reachable

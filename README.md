@@ -4,9 +4,9 @@
 </picture>
 
 
-**A quiet control surface for a DSH-powered desktop companion. (currently supports the ESP-32 Vocat/ Echoear)**
+**A quiet control surface for a DSH-powered desk companion. (currently supports the ESP32-S3 VoCat / EchoEar)**
 
-cue9 shows what DeepSeek Harness is doing on the companion’s round screen, and lets you choose the face for each action. It also brings DSH plugin setup and firmware flashing into one Mac app.
+cue9 shows what DeepSeek Harness is doing on the companion’s round screen, and lets you choose the face for each action. When the work goes quiet it keeps the time, and a swipe brings the weather. It also puts DSH plugin setup, the Wi-Fi bridge, and firmware flashing in one Mac app.
 
 ![The cue9 Mote view, following DSH](docs/cue9-mote.png)
 
@@ -18,9 +18,9 @@ cue9 shows what DeepSeek Harness is doing on the companion’s round screen, and
 
 ## What it does
 
-- **Mote** — or emotions - watch the face follow DSH, with the current cue and a short local history. Open **Edit** to map actions to animations, change expression and background colours, and test a face on the mote.
-- **Link** — USB, or Wi-Fi through a Raspberry Pi bridge.
-- **App** — Everything from DSH plugin setup, firmware flashing, connection status, and advanced settings.
+- **Mote** — watch the face follow DSH, with the current cue and a short local history. Open **Edit** to map actions to animations, change expression and background colours, and test a face on the mote.
+- **Clock and weather** — the mote’s other two pages, fed by the Pi. Set the timezone, city, °F/°C, and 12/24-hour clock under **Device → Ambient**.
+- **Device** — DSH plugin setup, the USB or Wi-Fi link, firmware flashing, and advanced settings.
 
 ## Get it running
 
@@ -31,6 +31,8 @@ cue9 shows what DeepSeek Harness is doing on the companion’s round screen, and
    open app/build/cue9.app
    ```
 3. Open **Device** if the plugin is not detected. cue9 finds DSH's current local port automatically; the address can still be set under **Advanced**.
+
+The clock and weather pages are fed by the Pi, so they need the Wi-Fi link. Set the timezone and place under **Device → Ambient**.
 
 More details in [SETUP.md](SETUP.md).
 
