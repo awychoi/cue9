@@ -96,6 +96,7 @@ final class PreviewEngine: ObservableObject {
     private static func duration(for state: Int) -> Float {
         switch state {
         case 0, 15, 16: return 5
+        case 20: return 3
         default: return 6
         }
     }

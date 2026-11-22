@@ -15,7 +15,7 @@
 #include "freertos/task.h"
 #include "freertos/semphr.h"
 #include "driver/gpio.h"
-#include "driver/i2c.h"
+#include "driver/i2c_master.h"
 #include "driver/spi_master.h"
 #include "driver/usb_serial_jtag.h"
 #include "esp_lcd_panel_io.h"
@@ -31,8 +31,10 @@
 #include "raster.h"
 #include "pip_scene.h"
 #include "ambient.h"
+#include "shake.h"
 #include "cue9_config.h"
 #include "cue9_wifi.h"
+#include "bmi270_api.h"
 
 #define TAG "PIPLIVE"
 #define BODY_ROWS 360
@@ -125,9 +127,31 @@ typedef struct {
 static gauge_state s_gauge;
 static portMUX_TYPE s_gauge_mux = portMUX_INITIALIZER_UNLOCKED;
 
-/* The touch controller shares I2C0 with the gauge; the legacy master driver
- * has no cross-task lock, so one mutex covers every transaction. */
-static SemaphoreHandle_t s_i2c_mux;
+/* One I2C0 master bus for the gauge, touch controller and IMU. The current
+ * i2c_master driver serialises its own transactions, so no mutex is needed. */
+static i2c_master_bus_handle_t s_i2c_bus;
+static i2c_master_dev_handle_t s_gauge_dev;
+static i2c_master_dev_handle_t s_touch_dev;
+
+/* BMI270 at 0x68. A shake posts a timestamp; the frame loop turns that into
+ * a local dizzy scene. Absent IMU means this stays inert. */
+static bmi270_handle_t s_bmi;
+static volatile int64_t s_shake_us;
+static shake_detector s_shake;
+#define DIZZY_DEFAULT_US 6000000LL   /* three ~2 s wobble loops */
+#define HAPPY_DEFAULT_US 2400000LL
+#define CRITICAL_SOC 5
+
+/* Runtime behaviour, set by the plugin's BEHAVIOUR line. Sensitivity 1..5
+ * raises or lowers the dynamic-acceleration threshold. */
+static volatile int64_t s_dizzy_us = DIZZY_DEFAULT_US;
+static volatile int64_t s_happy_us = HAPPY_DEFAULT_US;
+
+/* Stroking the screen: a slow drag, not a flick, posts a happy timestamp. */
+static volatile int64_t s_stroke_us;
+static volatile float s_stroke_x;
+#define STROKE_MIN_PATH 55.f
+#define STROKE_MIN_US 220000LL
 
 #define CST816_ADDR 0x15
 #define CST816_REG_POINTS 0x02
@@ -143,13 +167,20 @@ static volatile int s_touch_nav;   /* +1 next page, -1 previous, 0 none */
 static esp_err_t bq_read16(uint8_t reg, uint16_t *out)
 {
     uint8_t b[2];
-    if (s_i2c_mux) xSemaphoreTake(s_i2c_mux, portMAX_DELAY);
-    esp_err_t e = i2c_master_write_read_device(I2C_NUM_0, BQ27220_ADDR, &reg, 1, b, 2,
-                                               pdMS_TO_TICKS(50));
-    if (s_i2c_mux) xSemaphoreGive(s_i2c_mux);
+    esp_err_t e = i2c_master_transmit_receive(s_gauge_dev, &reg, 1, b, 2, 50);
     if (e != ESP_OK) return e;
     *out = (uint16_t)b[0] | ((uint16_t)b[1] << 8);
     return ESP_OK;
+}
+
+/* A glitched BQ27220 read must not look like a flat cell. Reject zero volts,
+ * a nonsensical SOC, or 0-5 % at a healthy pack voltage. */
+static bool gauge_plausible(uint16_t soc, uint16_t volt)
+{
+    if (soc > 100) return false;
+    if (volt < 2500 || volt > 4500) return false;
+    if (soc <= CRITICAL_SOC && volt > 3800) return false;
+    return true;
 }
 
 static void gauge_update(void)
@@ -159,6 +190,11 @@ static void gauge_update(void)
               (bq_read16(REG_CURRENT, &cur) == ESP_OK) &&
               (bq_read16(REG_VOLTAGE, &volt) == ESP_OK) &&
               (bq_read16(REG_BATTERY_STATUS, &status) == ESP_OK);
+    if (ok && !gauge_plausible(soc, volt)) {
+        ESP_LOGW(TAG, "gauge reject soc=%d%% %dmV st=0x%04x",
+                 (int)soc, (int)volt, (unsigned)status);
+        ok = false;
+    }
     if (ok) {
         int ma = (int)(int16_t)cur;
         bool fc = (status & (1u << 9)) != 0;      /* full-charged detected */
@@ -202,39 +238,147 @@ static void gauge_task(void *arg)
     }
 }
 
+/* Core 0: BMI270 shake. Samples at the sensor's 100 Hz rate and feeds the
+ * dynamic-acceleration detector: three swings in one burst trigger dizzy.
+ * Gravity is removed first, so a shake counts in any direction and the
+ * detector re-arms at each reversal instead of waiting for the device to
+ * come to rest. */
+static void imu_task(void *arg)
+{
+    (void)arg;
+    struct bmi2_sens_data cur = { 0 };
+    bool logged = false;
+    int fails = 0;
+    for (;;) {
+        int8_t rslt = bmi2_get_sensor_data(&cur, s_bmi);
+        if (rslt != BMI2_OK) {
+            if (++fails == 20) {
+                fails = 0;
+                ESP_LOGW(TAG, "IMU read failed");
+            }
+            vTaskDelay(pdMS_TO_TICKS(10));
+            continue;
+        }
+        fails = 0;
+        if (cur.status & BMI2_DRDY_ACC) {
+            int64_t now = esp_timer_get_time();
+            if (!logged) {
+                logged = true;
+                ESP_LOGI(TAG, "IMU acc %d %d %d", (int)cur.acc.x, (int)cur.acc.y,
+                         (int)cur.acc.z);
+            }
+            uint32_t revs_before = s_shake.rev_total;
+            if (shake_feed(&s_shake, (int)cur.acc.x, (int)cur.acc.y,
+                           (int)cur.acc.z, now)) {
+                s_shake_us = now;
+                ESP_LOGI(TAG, "shake trigger");
+            } else if (s_shake.rev_total != revs_before) {
+                ESP_LOGI(TAG, "shake reversal %d", s_shake.rev_count);
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+}
+
+static bool imu_init(void)
+{
+    if (s_i2c_bus == NULL) return false;
+    esp_err_t e = bmi270_sensor_create_from_master_bus(
+        s_i2c_bus, &s_bmi, bmi270_config_file,
+        BMI2_GYRO_CROSS_SENS_ENABLE | BMI2_CRT_RTOSK_ENABLE);
+    if (e != ESP_OK || s_bmi == NULL) {
+        ESP_LOGW(TAG, "BMI270 init failed: %s", esp_err_to_name(e));
+        s_bmi = NULL;
+        return false;
+    }
+    const uint8_t sens[] = { BMI2_ACCEL };
+    /* Make the shake threshold a known unit: 8192 counts per g. */
+    struct bmi2_sens_config cfg = { .type = BMI2_ACCEL };
+    if (bmi2_get_sensor_config(&cfg, 1, s_bmi) == BMI2_OK) {
+        cfg.cfg.acc.odr = BMI2_ACC_ODR_100HZ;
+        cfg.cfg.acc.range = BMI2_ACC_RANGE_4G;
+        cfg.cfg.acc.bwp = BMI2_ACC_NORMAL_AVG4;
+        cfg.cfg.acc.filter_perf = BMI2_PERF_OPT_MODE;
+        bmi2_set_sensor_config(&cfg, 1, s_bmi);
+    }
+    if (bmi2_sensor_enable(sens, 1, s_bmi) != BMI2_OK) {
+        ESP_LOGW(TAG, "BMI270 accel enable failed");
+        return false;
+    }
+    ESP_LOGI(TAG, "BMI270 ready");
+    return true;
+}
+
 /* Core 0: CST816S swipe. Reads points/x/y in one transaction and turns a
  * mostly-horizontal drag into a page step on release. The controller reports
  * before and after sleep on its own; no reset or config is needed here. */
 static void touch_task(void *arg)
 {
     (void)arg;
+    if (s_touch_dev == NULL) {
+        ESP_LOGW(TAG, "touch device unavailable");
+        vTaskDelete(NULL);
+        return;
+    }
     bool down = false;
+    bool stroking = false;
     int x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+    int px = 0, py = 0;
+    int64_t down_us = 0, last_stroke_us = 0;
+    float path_x = 0.f, path_y = 0.f;
     bool logged = false;
     for (;;) {
         uint8_t reg = CST816_REG_POINTS;
         uint8_t b[5];
-        esp_err_t e;
-        if (s_i2c_mux) xSemaphoreTake(s_i2c_mux, portMAX_DELAY);
-        e = i2c_master_write_read_device(I2C_NUM_0, CST816_ADDR, &reg, 1, b, sizeof(b),
-                                         pdMS_TO_TICKS(20));
-        if (s_i2c_mux) xSemaphoreGive(s_i2c_mux);
+        esp_err_t e = i2c_master_transmit_receive(s_touch_dev, &reg, 1, b, sizeof(b), 20);
         if (e == ESP_OK) {
             int pts = b[0] & 0x0f;
             int x = ((b[1] & 0x0f) << 8) | b[2];
             int y = ((b[3] & 0x0f) << 8) | b[4];
+            int64_t now = esp_timer_get_time();
             if (pts > 0) {
-                if (!down) { down = true; x0 = x; y0 = y; }
+                if (!down) {
+                    down = true;
+                    stroking = false;
+                    path_x = 0.f;
+                    path_y = 0.f;
+                    down_us = now;
+                    x0 = px = x;
+                    y0 = py = y;
+                } else {
+                    float dx = (float)(x - px), dy = (float)(y - py);
+                    path_x += fabsf(dx);
+                    path_y += fabsf(dy);
+                }
                 x1 = x;
                 y1 = y;
+                px = x;
+                py = y;
                 if (!logged) {
                     logged = true;
                     ESP_LOGI(TAG, "touch works (%d,%d)%s", x, y, pts > 1 ? " multi" : "");
                 }
+                /* A deliberate rub starts happy mid-gesture and keeps it alive;
+                 * a quick horizontal flick still turns the page on release. */
+                /* Petting is a vertical rub; left/right belongs to page swipes. */
+                if (!stroking && path_y >= STROKE_MIN_PATH &&
+                    path_y > path_x * 1.2f && now - down_us >= STROKE_MIN_US) {
+                    stroking = true;
+                    last_stroke_us = now;
+                    s_stroke_x = (float)(x - 180) / 180.f;
+                    s_stroke_us = now;
+                    ESP_LOGI(TAG, "stroke (%d,%d)", x, y);
+                } else if (stroking && now - last_stroke_us > 250000LL) {
+                    last_stroke_us = now;
+                    s_stroke_x = (float)(x - 180) / 180.f;
+                    s_stroke_us = now;
+                }
             } else if (down) {
                 down = false;
                 int dx = x1 - x0, dy = y1 - y0;
-                if (abs(dx) >= 40 && abs(dx) > abs(dy)) {
+                if (stroking) {
+                    ESP_LOGI(TAG, "stroke end (%d,%d)", x1, y1);
+                } else if (abs(dx) >= 40 && abs(dx) > abs(dy)) {
                     s_touch_nav = dx < 0 ? 1 : -1;
                     ESP_LOGI(TAG, "swipe %s (%d,%d)->(%d,%d)", dx < 0 ? "next" : "prev",
                              x0, y0, x1, y1);
@@ -254,22 +398,41 @@ static void gauge_get(gauge_state *g)
     portEXIT_CRITICAL(&s_gauge_mux);
 }
 
-static void gauge_init(void)
+static bool i2c_devices_init(void)
 {
-    i2c_config_t conf = {
-        .mode = I2C_MODE_MASTER,
+    i2c_master_bus_config_t bus_cfg = {
+        .i2c_port = I2C_NUM_0,
         .sda_io_num = 2,
         .scl_io_num = 1,
-        .sda_pullup_en = GPIO_PULLUP_ENABLE,
-        .scl_pullup_en = GPIO_PULLUP_ENABLE,
-        .master.clk_speed = 400000,
+        .clk_source = I2C_CLK_SRC_DEFAULT,
+        .glitch_ignore_cnt = 7,
+        .flags.enable_internal_pullup = true,
     };
-    esp_err_t e = i2c_param_config(I2C_NUM_0, &conf);
-    if (e == ESP_OK) e = i2c_driver_install(I2C_NUM_0, I2C_MODE_MASTER, 0, 0, 0);
-    if (e != ESP_OK) {
-        ESP_LOGE(TAG, "gauge I2C init failed: %s", esp_err_to_name(e));
-        return;
+    i2c_device_config_t dev_cfg = {
+        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+        .scl_speed_hz = 400000,
+    };
+    if (i2c_new_master_bus(&bus_cfg, &s_i2c_bus) != ESP_OK) {
+        ESP_LOGE(TAG, "I2C bus init failed");
+        s_i2c_bus = NULL;
+        return false;
     }
+    dev_cfg.device_address = BQ27220_ADDR;
+    if (i2c_master_bus_add_device(s_i2c_bus, &dev_cfg, &s_gauge_dev) != ESP_OK) {
+        ESP_LOGE(TAG, "gauge device add failed");
+        return false;
+    }
+    dev_cfg.device_address = CST816_ADDR;
+    if (i2c_master_bus_add_device(s_i2c_bus, &dev_cfg, &s_touch_dev) != ESP_OK) {
+        ESP_LOGW(TAG, "touch device add failed");
+        s_touch_dev = NULL;
+    }
+    return true;
+}
+
+static void gauge_init(void)
+{
+    if (!i2c_devices_init()) return;
     memset(&s_gauge, 0, sizeof(s_gauge));
     /* A single read after deep sleep can still carry the last charging
      * current. Take a few fresh samples so the debounced charging flag is
@@ -284,12 +447,13 @@ static void gauge_init(void)
 /* Below this the cell cannot safely carry the panel and Wi-Fi. Booting anyway
  * gives a brown-out reboot loop when USB power disappears (the KVM case);
  * sleep instead and wake every 30 s to see whether the charger is back. */
-#define CRITICAL_SOC 5
-
 static bool battery_critical(const gauge_state *g)
 {
     if (!g->valid) return false;
     if (g->soc > CRITICAL_SOC) return false;
+    /* A healthy pack voltage cannot belong to a flat cell. This rejects a
+     * corrupt SOC read (0 % at 4.1 V) before it can black out the screen. */
+    if (g->voltage_mv > 3800) return false;
     if (g->charging || g->current_ma > 20) return false;
     return true;
 }
@@ -736,7 +900,7 @@ const char *cue9_handle_line(char *line)
             if (idx >= 0 && end != hex && *end == 0 && value <= 0xffffffUL) {
                 s_color_pending[idx] = (uint32_t)value;
                 s_color_pending_set[idx] = true;
-                ESP_LOGI(TAG, "cmd color %s #%06lx", name, value);
+                ESP_LOGD(TAG, "cmd color %s #%06lx", name, value);
             } else {
                 ESP_LOGW(TAG, "cmd bad color %s %s", name, hex);
             }
@@ -756,7 +920,7 @@ const char *cue9_handle_line(char *line)
             if (idx >= 0 && end != hex && *end == 0 && value <= 0xffffffUL) {
                 s_bg_pending[idx] = (uint32_t)value;
                 s_bg_pending_set[idx] = true;
-                ESP_LOGI(TAG, "cmd bg %s #%06lx", name, value);
+                ESP_LOGD(TAG, "cmd bg %s #%06lx", name, value);
             } else {
                 ESP_LOGW(TAG, "cmd bad bg %s %s", name, hex);
             }
@@ -796,6 +960,37 @@ const char *cue9_handle_line(char *line)
         s_remote = false;
         s_demo = true;
         ESP_LOGI(TAG, "cmd demo");
+    } else if (strcmp(line, "DIZZY") == 0) {
+        /* Same path as a shake; useful for checking the page return. */
+        s_shake_us = esp_timer_get_time();
+        ESP_LOGI(TAG, "cmd dizzy");
+    } else if (strcmp(line, "STROKE") == 0) {
+        /* Same path as a screen stroke; useful for checking the page return. */
+        s_stroke_x = 0.f;
+        s_stroke_us = esp_timer_get_time();
+        ESP_LOGI(TAG, "cmd stroke");
+    } else if (strncmp(line, "BEHAVIOUR ", 10) == 0) {
+        const char *bp = line + 10;
+        long long level_ll = 0, dizzy_ll = 0, happy_ll = 0;
+        if (parse_ll(&bp, &level_ll) && parse_ll(&bp, &dizzy_ll) &&
+            parse_ll(&bp, &happy_ll)) {
+            int level = (int)level_ll;
+            long dizzy_ms = (long)dizzy_ll;
+            long happy_ms = (long)happy_ll;
+            if (level < 1) level = 1;
+            if (level > 5) level = 5;
+            if (dizzy_ms < 1000) dizzy_ms = 1000;
+            if (dizzy_ms > 15000) dizzy_ms = 15000;
+            if (happy_ms < 800) happy_ms = 800;
+            if (happy_ms > 8000) happy_ms = 8000;
+            shake_set_sensitivity(&s_shake, level);
+            s_dizzy_us = (int64_t)dizzy_ms * 1000;
+            s_happy_us = (int64_t)happy_ms * 1000;
+            ESP_LOGI(TAG, "behaviour level=%d dizzy=%ldms happy=%ldms", level,
+                     dizzy_ms, happy_ms);
+        } else {
+            ESP_LOGW(TAG, "cmd bad behaviour");
+        }
     } else if (strcmp(line, "ALIVE") == 0) {
         /* heartbeat only; the timestamp was advanced above */
     } else if (strcmp(line, "PING") == 0) {
@@ -930,6 +1125,9 @@ static void wait_build(void)
 
 void app_main(void)
 {
+    /* The CST816S NACKs every idle read; the i2c_master driver logs each one
+     * at ERROR. Touch is polled, so silence the driver and keep our own logs. */
+    esp_log_level_set("i2c.master", ESP_LOG_NONE);
     esp_reset_reason_t rr = esp_reset_reason();
     if (s_boot_magic != BOOT_MAGIC) {
         s_boot_magic = BOOT_MAGIC;
@@ -943,7 +1141,6 @@ void app_main(void)
 
     /* Read the gauge before powering the panel: a nearly empty cell must not
      * be asked to carry a full boot only to brown out and reboot. */
-    s_i2c_mux = xSemaphoreCreateMutex();
     gauge_init();
     gauge_state boot_gauge;
     gauge_get(&boot_gauge);
@@ -996,6 +1193,7 @@ void app_main(void)
 
     pip_scene_init(&s_scene, 1u);
     pip_opts_default(&s_opt);
+    shake_init(&s_shake, 3);
     s_opt.rings = false;
     s_opt.njob = 0;
     s_opt.charging = true;
@@ -1007,6 +1205,9 @@ void app_main(void)
     xTaskCreatePinnedToCore(cmd_task, "pip_cmd", 4096, NULL, 4, NULL, 0);
     xTaskCreatePinnedToCore(log_gate_task, "pip_log", 2048, NULL, 2, NULL, 0);
     xTaskCreatePinnedToCore(touch_task, "pip_touch", 3072, NULL, 3, NULL, 0);
+    if (imu_init()) {
+        xTaskCreatePinnedToCore(imu_task, "pip_imu", 4096, NULL, 3, NULL, 0);
+    }
 
     /* The first body flush in the frame loop primes the DMA; nothing on the
      * panel is drawn before that. s_done starts at 0 and the TE wait before
@@ -1023,14 +1224,15 @@ void app_main(void)
     static const int demo_order[] = {
         PIP_WORK, PIP_IDLE, PIP_SLEEP, PIP_OFFLINE, PIP_CURIOUS, PIP_THINKING,
         PIP_SEARCH, PIP_READ, PIP_WAIT, PIP_WAKE, PIP_APPROVAL, PIP_MCQ,
-        PIP_RETRY, PIP_DONE, PIP_HUB
+        PIP_RETRY, PIP_DONE, PIP_TOOL_CALL, PIP_RUN_CMD, PIP_HUB
     };
     int oi = 0;
     uint32_t refresh_seen = s_refresh_seq;
     uint32_t cmd_seen = s_cmd_seq;
     int state = PIP_HUB;
+    int base_state = PIP_HUB;   /* timeline under a dizzy overlay */
     bool demo_active = false;
-    float t = 0.0f;
+    float base_t = 0.0f;
     float since_glow = 0.0f;
     float since_agents = 1.5f;
     uint32_t agent_rng = 0x9e3779b9u;
@@ -1046,10 +1248,18 @@ void app_main(void)
     const char *last_clock_label = NULL;
     int64_t quiet_since = 0;
     uint32_t page_cmd_seen = 0;
+    /* Sensor reactions (shake -> dizzy, stroke -> happy) take over the page. */
+    int reaction_state = -1;
+    int64_t reaction_start = 0;
+    int64_t reaction_until = 0;
+    int reaction_page = AMB_PAGE_LIVE;
+    int64_t shake_seen = 0;
+    int64_t stroke_seen = 0;
     int64_t acc_render = 0, acc_clear = 0, acc_flush = 0, acc_wait_build = 0;
     int64_t next = esp_timer_get_time();
     int64_t last_frame = next;
     int64_t last_batt_check = next;
+    int batt_critical_runs = 0;
     int64_t fps_t0 = next;
     int64_t host_lost_us = 0;
     int fps_frames = 0;
@@ -1058,7 +1268,7 @@ void app_main(void)
     /* First frame: build synchronously through the worker. */
     r_glow_enable(false);   /* work starts glow-off */
     s_build_state = state;
-    s_build_t = t;
+    s_build_t = 0.0f;
     s_build_dt = 1.0f / 30.0f;
     s_build_reset = true;
     s_build_done = false;
@@ -1077,7 +1287,16 @@ void app_main(void)
             last_batt_check = now;
             gauge_state bg;
             gauge_get(&bg);
-            if (battery_critical(&bg)) low_battery_sleep(&bg);
+            if (battery_critical(&bg)) {
+                if (++batt_critical_runs >= 2) {
+                    low_battery_sleep(&bg);
+                } else {
+                    ESP_LOGW(TAG, "battery critical sample soc=%d%% %dmV; confirming",
+                             bg.soc, bg.voltage_mv);
+                }
+            } else {
+                batt_critical_runs = 0;
+            }
         }
 
         /* No USB host means no Mac bridge. Hold hub rather than dropping into
@@ -1114,9 +1333,10 @@ void app_main(void)
         acc_clear += a2 - a;
         acc_render += b - a2;
 
-        /* Explicit demo tour; otherwise remote hold; otherwise hub. */
-        int ns = state;
-        float nt = t + dt;
+        /* Explicit demo tour; otherwise remote hold; otherwise hub. This
+         * timeline keeps running under a dizzy overlay. */
+        int ns = base_state;
+        float nt = base_t + dt;
         bool reset = false;
         if (s_demo) {
             if (!demo_active) {
@@ -1133,7 +1353,7 @@ void app_main(void)
                     s_agent_count = (int)((agent_rng >> 16) % 20u);
                     ESP_LOGI(TAG, "agents=%d", s_agent_count);
                 }
-                if (t >= ((state == PIP_WORK) ? 15.0f : 6.0f)) {
+                if (base_t >= ((base_state == PIP_WORK) ? 15.0f : 6.0f)) {
                     oi = (oi + 1) % (int)(sizeof(demo_order) / sizeof(demo_order[0]));
                     ns = demo_order[oi];
                     nt = 0.0f;
@@ -1157,12 +1377,82 @@ void app_main(void)
             }
         } else {
             demo_active = false;
-            if (state != PIP_HUB) {
+            if (base_state != PIP_HUB) {
                 ns = PIP_HUB;
                 nt = 0.0f;
                 reset = true;
                 s_agent_count = 0;
             }
+        }
+        base_state = ns;
+        base_t = nt;
+        int base_ns = ns;
+        bool urgent_base = (base_ns == PIP_APPROVAL || base_ns == PIP_MCQ);
+
+        /* Sensor reactions: a shake shows dizzy, a vertical screen stroke
+         * shows happy. An approval/question outranks both: it cancels a
+         * running reaction and ignores new shakes or strokes until DSH
+         * answers it. */
+        {
+            int64_t shake = s_shake_us;
+            if (shake != 0 && shake != shake_seen && now - shake < 2000000LL) {
+                shake_seen = shake;
+                if (urgent_base) {
+                    ESP_LOGI(TAG, "shake ignored (urgent)");
+                } else {
+                    if (reaction_state < 0) reaction_page = page;
+                    reaction_state = PIP_DIZZY;
+                    reaction_start = shake;
+                    reaction_until = shake + s_dizzy_us;
+                    reset = true;
+                    ESP_LOGI(TAG, "shake -> dizzy (page %d)", reaction_page);
+                }
+            }
+            int64_t stroke = s_stroke_us;
+            if (stroke != 0 && stroke != stroke_seen && now - stroke < 2000000LL) {
+                stroke_seen = stroke;
+                if (urgent_base) {
+                    ESP_LOGI(TAG, "stroke ignored (urgent)");
+                } else {
+                    if (reaction_state < 0) reaction_page = page;
+                    if (reaction_state != PIP_STROKED) {
+                        /* A rub interrupts dizzy; the startle does not win here. */
+                        reaction_state = PIP_STROKED;
+                        reaction_start = stroke;
+                        reset = true;
+                    }
+                    reaction_until = stroke + s_happy_us;
+                    ESP_LOGI(TAG, "stroke -> happy (page %d)", reaction_page);
+                }
+            }
+            if (urgent_base && reaction_state >= 0) {
+                if (!forced_live) {
+                    resume_page = reaction_page;
+                    forced_live = true;
+                }
+                ESP_LOGI(TAG, "urgent clears sensor reaction %d", reaction_state);
+                reaction_state = -1;
+                reaction_until = 0;
+            }
+        }
+        bool reacting = reaction_state >= 0 && now < reaction_until;
+        if (reacting) {
+            ns = reaction_state;
+            nt = (float)((double)(now - reaction_start) / 1000000.0);
+        } else if (reaction_state >= 0) {
+            int finished = reaction_state;
+            page = reaction_page;
+            reaction_state = -1;
+            /* An approval that arrived during the overlay takes the screen now. */
+            if (base_ns == PIP_APPROVAL || base_ns == PIP_MCQ) {
+                if (!forced_live) {
+                    resume_page = page;
+                    forced_live = true;
+                }
+                page = AMB_PAGE_LIVE;
+            }
+            ESP_LOGI(TAG, "%s done: page %d",
+                     finished == PIP_DIZZY ? "dizzy" : "happy", page);
         }
         since_glow += dt;
         if (since_glow >= 3.0f) {
@@ -1179,6 +1469,7 @@ void app_main(void)
         /* Pages: live face, clock, weather. A swipe or PAGE moves between
          * them and stays put: only an approval or question may take the
          * screen. When that cue clears, the page it interrupted comes back. */
+        int page_before = page;
         uint32_t page_cmd_now = s_page_cmd_seq;
         if (page_cmd_now != page_cmd_seen) {
             page_cmd_seen = page_cmd_now;
@@ -1195,7 +1486,7 @@ void app_main(void)
             auto_done = true;
             forced_live = false;
         }
-        bool quiet = (ns == PIP_SLEEP || ns == PIP_HUB);
+        bool quiet = (base_ns == PIP_SLEEP || base_ns == PIP_HUB);
         if (quiet && !was_quiet) {
             quiet_since = now;
             auto_done = false;
@@ -1208,7 +1499,7 @@ void app_main(void)
             auto_done = true;
             ESP_LOGI(TAG, "auto clock after 60s quiet");
         }
-        bool urgent = (ns == PIP_APPROVAL || ns == PIP_MCQ);
+        bool urgent = urgent_base;
         if (urgent && !was_urgent) {
             if (!forced_live) {
                 resume_page = page;
@@ -1226,6 +1517,20 @@ void app_main(void)
             }
         }
         was_urgent = urgent;
+        if (reacting) {
+            if (page != page_before) {
+                /* The user paged away mid-reaction: drop the reaction and
+                 * leave them on the page they asked for. */
+                reaction_state = -1;
+                ns = base_ns;
+                nt = base_t;
+                reset = false;
+                ESP_LOGI(TAG, "reaction ended by page change");
+            } else {
+                page = AMB_PAGE_LIVE;   /* the face is the reaction; page comes back after */
+                s_touch_nav = 0;
+            }
+        }
         if (page == AMB_PAGE_CLOCK) {
             const char *label = state_status_label(ns);
             if (label != last_clock_label) {
@@ -1244,6 +1549,7 @@ void app_main(void)
             page_seen = page;
         }
 
+        s_opt.stroke = s_stroke_x;
         s_build_page = page;
         s_build_state = ns;
         s_build_t = nt;
@@ -1262,7 +1568,6 @@ void app_main(void)
         acc_wait_build += esp_timer_get_time() - w0;
 
         state = ns;
-        t = nt;
         frame++;
         fps_frames++;
 

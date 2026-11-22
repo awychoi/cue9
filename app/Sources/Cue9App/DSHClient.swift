@@ -9,6 +9,7 @@ struct DSHPluginAction: Codable, Hashable {
 struct DSHPluginAnimation: Codable, Hashable {
     let id: String
     let label: String
+    var deviceOnly: Bool? = nil
 }
 
 struct DSHPluginState: Decodable {
@@ -30,6 +31,12 @@ struct DSHPluginState: Decodable {
         let keepAwake: Bool?
     }
 
+    struct Behaviour: Decodable {
+        let sensitivity: Int?
+        let dizzyMs: Int?
+        let happyMs: Int?
+    }
+
     let current: String?
     let currentAnim: String?
     let previewing: Bool?
@@ -40,6 +47,9 @@ struct DSHPluginState: Decodable {
     let animations: [DSHPluginAnimation]?
     let status: Status?
     let link: Link?
+    let behaviour: Behaviour?
+    let palette: [String: String]?
+    let backgrounds: [String: String]?
 }
 
 enum DSHClientError: LocalizedError {
@@ -123,5 +133,11 @@ struct DSHClient {
 
     func palette(_ value: [String: String], backgrounds: [String: String]) async throws -> DSHPluginState {
         try await post("plugins/cue9/palette", body: ["palette": value, "backgrounds": backgrounds])
+    }
+
+    func behaviour(sensitivity: Int, dizzyMs: Int, happyMs: Int) async throws -> DSHPluginState {
+        try await post("plugins/cue9/behaviour", body: [
+            "behaviour": ["sensitivity": sensitivity, "dizzyMs": dizzyMs, "happyMs": happyMs],
+        ])
     }
 }

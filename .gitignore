@@ -19,11 +19,18 @@ firmware/sdkconfig.old
 firmware/managed_components/
 
 # Local agent instructions
-/AGENTS.md
 
 # Provisioning output: Wi-Fi config images and TLS keys/certs
 cue9cfg*.bin
 *.key
 *.crt
 *.pem
+*.p8
+*.p12
+*.pfx
 .env
+.netrc
+id_rsa*
+id_ed25519*
+
+/AGENTS.md

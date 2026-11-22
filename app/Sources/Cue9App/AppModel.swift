@@ -22,11 +22,18 @@ final class AppModel: ObservableObject {
     @Published var linkBusy = false
     @Published var linkError: String?
     @Published var bridgeHost = UserDefaults.standard.string(forKey: "bridgeHost") ?? ""
+    @Published var shakeSensitivity: Int
+    @Published var dizzySeconds: Double
+    @Published var happySeconds: Double
 
     let preview = PreviewEngine()
     let flasher = FirmwareFlasher()
     private var pollTask: Task<Void, Never>?
     private var colourSaveTask: Task<Void, Never>?
+    private var behaviourSaveTask: Task<Void, Never>?
+    private var behaviourLoaded = false
+    private var coloursSynced = false
+    private var lastColoursPush = Date.distantPast
     private var saveClearTask: Task<Void, Never>?
     private var testClearTask: Task<Void, Never>?
     private var client: DSHClient
@@ -37,6 +44,11 @@ final class AppModel: ObservableObject {
     private var discoveringPort = false
 
     init() {
+        let defaults = UserDefaults.standard
+        shakeSensitivity = defaults.object(forKey: "shakeSensitivity") as? Int ?? 3
+        dizzySeconds = defaults.object(forKey: "dizzySeconds") as? Double ?? 6
+        happySeconds = defaults.object(forKey: "happySeconds") as? Double ?? 2.4
+
         let savedURL = UserDefaults.standard.string(forKey: "dshURL") ?? "http://127.0.0.1:53614"
         dshURLString = savedURL
         client = DSHClient(baseURL: URL(string: savedURL) ?? URL(string: "http://127.0.0.1:53614")!)
@@ -49,10 +61,13 @@ final class AppModel: ObservableObject {
             storedMapping,
             actions: initialActions,
             animations: initialAnimations,
-            seedNewActions: true
+            seedNewActions: true,
+            keepStoredUnknowns: true
         )
-        let initialPalette = Self.loadPalette()
-        let initialBackgrounds = Self.loadBackgrounds()
+        let storedPalette = Self.loadPaletteFile()
+        let storedBackgrounds = Self.loadBackgroundFile()
+        let initialPalette = CueCatalog.defaultPalette.merging(storedPalette ?? [:]) { _, new in new }
+        let initialBackgrounds = storedBackgrounds ?? [:]
 
         actions = initialActions
         animations = initialAnimations
@@ -102,11 +117,15 @@ final class AppModel: ObservableObject {
             reset: true
         )
         startPolling()
+        if !FileManager.default.fileExists(atPath: CuePaths.palette.path) {
+            persistColours(sendToPlugin: false, showBadge: false)
+        }
     }
 
     deinit {
         pollTask?.cancel()
         colourSaveTask?.cancel()
+        behaviourSaveTask?.cancel()
         saveClearTask?.cancel()
         testClearTask?.cancel()
     }
@@ -221,10 +240,18 @@ final class AppModel: ObservableObject {
         do {
             let state = try await client.state()
             pluginState = state
+            if !behaviourLoaded, let behaviour = state.behaviour {
+                behaviourLoaded = true
+                if let value = behaviour.sensitivity { shakeSensitivity = value }
+                if let value = behaviour.dizzyMs { dizzySeconds = Double(value) / 1000 }
+                if let value = behaviour.happyMs { happySeconds = Double(value) / 1000 }
+                persistBehaviourLocally()
+            }
             dshOnline = true
             isReconnecting = false
             failedPolls = 0
             pluginError = nil
+            syncColoursIfNeeded(state)
             if !everConnected {
                 everConnected = true
                 UserDefaults.standard.set(true, forKey: "everConnected")
@@ -322,6 +349,7 @@ final class AppModel: ObservableObject {
     }
 
     func toggleMapping(_ animation: String) {
+        guard !isDeviceOnly(animation) else { return }
         var list = mapping[selectedAction] ?? []
         if let index = list.firstIndex(of: animation) {
             list.remove(at: index)
@@ -386,6 +414,60 @@ final class AppModel: ObservableObject {
     }
 
     /// The best action to preview when testing an animation's colours.
+    var mappableAnimations: [CueAnimation] { animations.filter { !$0.deviceOnly } }
+    var deviceAnimations: [CueAnimation] { animations.filter(\.deviceOnly) }
+
+    func isDeviceOnly(_ animation: String) -> Bool {
+        animations.first(where: { $0.id == animation })?.deviceOnly == true
+    }
+
+    func previewDeviceAnimation(_ animation: String) {
+        previewAction("idle", animation: animation)
+    }
+
+    func updateBehaviour(
+        sensitivity: Int? = nil,
+        dizzySeconds: Double? = nil,
+        happySeconds: Double? = nil
+    ) {
+        if let sensitivity {
+            shakeSensitivity = min(5, max(1, sensitivity))
+        }
+        if let dizzySeconds {
+            self.dizzySeconds = min(10, max(2, dizzySeconds))
+        }
+        if let happySeconds {
+            self.happySeconds = min(4, max(1, happySeconds))
+        }
+        persistBehaviourLocally()
+        behaviourSaveTask?.cancel()
+        behaviourSaveTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            guard !Task.isCancelled, let self else { return }
+            await self.pushBehaviour()
+        }
+    }
+
+    private func persistBehaviourLocally() {
+        let defaults = UserDefaults.standard
+        defaults.set(shakeSensitivity, forKey: "shakeSensitivity")
+        defaults.set(dizzySeconds, forKey: "dizzySeconds")
+        defaults.set(happySeconds, forKey: "happySeconds")
+    }
+
+    private func pushBehaviour() async {
+        guard dshOnline else { return }
+        do {
+            _ = try await client.behaviour(
+                sensitivity: shakeSensitivity,
+                dizzyMs: Int((dizzySeconds * 1000).rounded()),
+                happyMs: Int((happySeconds * 1000).rounded())
+            )
+        } catch {
+            pluginError = "Could not send behaviour: \(error.localizedDescription)"
+        }
+    }
+
     func actionUsing(_ animation: String) -> String? {
         if mapping[selectedAction]?.contains(animation) == true {
             return selectedAction
@@ -683,7 +765,9 @@ final class AppModel: ObservableObject {
     private func saveCatalog() {
         let cache = CachedCatalog(
             actions: actions.map { DSHPluginAction(id: $0.id, label: $0.label, map: $0.defaultMap) },
-            animations: animations.map { DSHPluginAnimation(id: $0.id, label: $0.label) }
+            animations: animations.map {
+                DSHPluginAnimation(id: $0.id, label: $0.label, deviceOnly: $0.deviceOnly)
+            }
         )
         guard let data = try? JSONEncoder().encode(cache) else { return }
         try? data.write(to: CuePaths.catalog, options: .atomic)
@@ -695,7 +779,12 @@ final class AppModel: ObservableObject {
 
     private static func makeAnimations(_ remote: [DSHPluginAnimation]) -> [CueAnimation] {
         remote.map {
-            CueAnimation(id: $0.id, label: $0.label, color: CueCatalog.defaultColor(for: $0.id))
+            CueAnimation(
+                id: $0.id,
+                label: $0.label,
+                color: CueCatalog.defaultColor(for: $0.id),
+                deviceOnly: $0.deviceOnly == true
+            )
         }
     }
 
@@ -703,15 +792,23 @@ final class AppModel: ObservableObject {
         _ input: [String: [String]],
         actions: [CueAction],
         animations: [CueAnimation],
-        seedNewActions: Bool
+        seedNewActions: Bool,
+        keepStoredUnknowns: Bool = false
     ) -> [String: [String]] {
         guard !actions.isEmpty, !animations.isEmpty else { return input }
         let validActions = Set(actions.map(\.id))
-        let validAnimations = Set(animations.map(\.id))
+        let deviceOnly = Set(animations.filter(\.deviceOnly).map(\.id))
+        let validAnimations = Set(animations.filter { !$0.deviceOnly }.map(\.id))
         var next = input
         for action in actions {
             if let existing = next[action.id] {
-                let filtered = existing.filter { validAnimations.contains($0) }
+                /* The cached catalog can lag the plugin right after new
+                 * actions or animations are added. Keep stored ids until a
+                 * live list arrives, then filter against the authoritative
+                 * one. */
+                let filtered = existing.filter {
+                    !deviceOnly.contains($0) && (keepStoredUnknowns || validAnimations.contains($0))
+                }
                 if filtered.isEmpty && !existing.isEmpty {
                     next[action.id] = action.defaultMap.filter { validAnimations.contains($0) }
                 } else {
@@ -723,7 +820,9 @@ final class AppModel: ObservableObject {
                     : []
             }
         }
-        next = next.filter { validActions.contains($0.key) }
+        if !keepStoredUnknowns {
+            next = next.filter { validActions.contains($0.key) }
+        }
         return next
     }
 
@@ -768,6 +867,67 @@ final class AppModel: ObservableObject {
         }
     }
 
+    private var localHasCustomPalette: Bool {
+        palette.contains { id, rgb in rgb != CueCatalog.defaultColor(for: id) }
+    }
+
+    private var localHasCustomBackgrounds: Bool {
+        backgrounds.contains { _, rgb in rgb != CueCatalog.defaultBackground }
+    }
+
+    /// The app owns the colour store. On the first successful poll it pushes
+    /// that store to the plugin, which mirrors it and sends it to the firmware.
+    /// If the app has no custom colours but the plugin does, the app adopts
+    /// them instead, so a wiped local file can recover from the plugin.
+    private func syncColoursIfNeeded(_ state: DSHPluginState) {
+        let remotePalette = state.palette?.compactMapValues { Self.parseHex($0) } ?? [:]
+        let remoteBackgrounds = state.backgrounds?.compactMapValues { Self.parseHex($0) } ?? [:]
+        let remoteHasCustomPalette = remotePalette.contains { id, rgb in
+            rgb != CueCatalog.defaultColor(for: id)
+        }
+        let remoteHasCustomBackgrounds = remoteBackgrounds.contains { _, rgb in
+            rgb != CueCatalog.defaultBackground
+        }
+
+        if !coloursSynced {
+            coloursSynced = true
+            if localHasCustomPalette || localHasCustomBackgrounds {
+                pushColours()
+            } else if remoteHasCustomPalette || remoteHasCustomBackgrounds {
+                adoptRemoteColours(remotePalette, backgrounds: remoteBackgrounds)
+            } else {
+                pushColours()
+            }
+            return
+        }
+
+        let paletteMissing = localHasCustomPalette && !remoteHasCustomPalette
+        let backgroundsMissing = localHasCustomBackgrounds && !remoteHasCustomBackgrounds
+        if (paletteMissing || backgroundsMissing),
+           Date().timeIntervalSince(lastColoursPush) > 2 {
+            pushColours()
+        }
+    }
+
+    private func pushColours() {
+        lastColoursPush = Date()
+        persistColours(sendToPlugin: true, showBadge: false)
+    }
+
+    private func adoptRemoteColours(_ remotePalette: [String: RGB],
+                                    backgrounds remoteBackgrounds: [String: RGB]) {
+        guard !remotePalette.isEmpty || !remoteBackgrounds.isEmpty else { return }
+        var nextPalette = palette
+        var nextBackgrounds = backgrounds
+        for (id, rgb) in remotePalette { nextPalette[id] = rgb }
+        for (id, rgb) in remoteBackgrounds { nextBackgrounds[id] = rgb }
+        guard nextPalette != palette || nextBackgrounds != backgrounds else { return }
+        palette = nextPalette
+        backgrounds = nextBackgrounds
+        persistColours(sendToPlugin: false, showBadge: false)
+        configurePreview(reset: false)
+    }
+
     private func persistColours(sendToPlugin: Bool, showBadge: Bool) {
         let ink = palette.mapValues { "#\($0.hex)" }
         let background = backgrounds.mapValues { "#\($0.hex)" }
@@ -780,6 +940,8 @@ final class AppModel: ObservableObject {
                 withJSONObject: background,
                 options: [.prettyPrinted, .sortedKeys]
             )
+            Self.backupColourFile(CuePaths.palette, to: CuePaths.paletteBackup)
+            Self.backupColourFile(CuePaths.backgrounds, to: CuePaths.backgroundsBackup)
             try inkData.write(to: CuePaths.palette, options: .atomic)
             try backgroundData.write(to: CuePaths.backgrounds, options: .atomic)
             if showBadge {
@@ -848,30 +1010,58 @@ final class AppModel: ObservableObject {
         return object
     }
 
-    private static func loadPalette() -> [String: RGB] {
-        var result = CueCatalog.defaultPalette
-        guard
-            let data = try? Data(contentsOf: CuePaths.palette),
-            let object = try? JSONSerialization.jsonObject(with: data) as? [String: String]
-        else { return result }
-        for (key, value) in object {
-            guard let rgb = parseHex(value) else { continue }
-            result[key] = rgb
+    private static func loadPaletteFile() -> [String: RGB]? {
+        let maps = [CuePaths.palette, CuePaths.legacyPalette, CuePaths.paletteBackup]
+            .compactMap(readColourMap)
+        return bestColourMap(maps) { id, rgb in
+            rgb != CueCatalog.defaultColor(for: id)
         }
-        return result
     }
 
-    private static func loadBackgrounds() -> [String: RGB] {
+    private static func loadBackgroundFile() -> [String: RGB]? {
+        let maps = [CuePaths.backgrounds, CuePaths.legacyBackgrounds, CuePaths.backgroundsBackup]
+            .compactMap(readColourMap)
+        return bestColourMap(maps) { _, rgb in
+            rgb != CueCatalog.defaultBackground
+        }
+    }
+
+    /// Prefer the copy that still has the most custom values. This lets a
+    /// wiped or defaulted app store recover from the plugin mirror or backup.
+    private static func bestColourMap(_ maps: [[String: RGB]],
+                                      isCustom: (String, RGB) -> Bool) -> [String: RGB]? {
+        var best: [String: RGB]?
+        var bestCount = -1
+        for map in maps {
+            let count = map.reduce(0) { $0 + (isCustom($1.key, $1.value) ? 1 : 0) }
+            if count > bestCount {
+                best = map
+                bestCount = count
+            }
+        }
+        return best
+    }
+
+    private static func readColourMap(_ url: URL) -> [String: RGB]? {
         guard
-            let data = try? Data(contentsOf: CuePaths.backgrounds),
+            let data = try? Data(contentsOf: url),
             let object = try? JSONSerialization.jsonObject(with: data) as? [String: String]
-        else { return [:] }
+        else { return nil }
         var result: [String: RGB] = [:]
         for (key, value) in object {
             guard let rgb = parseHex(value) else { continue }
             result[key] = rgb
         }
-        return result
+        return result.isEmpty ? nil : result
+    }
+
+    private static func backupColourFile(_ source: URL, to backup: URL) {
+        guard
+            let data = try? Data(contentsOf: source),
+            !data.isEmpty,
+            (try? JSONSerialization.jsonObject(with: data)) != nil
+        else { return }
+        try? data.write(to: backup, options: .atomic)
     }
 
     private static func loadHistory() -> [CueEvent] {

@@ -51,6 +51,7 @@ struct DeviceView: View {
 
                 pluginCard
                 wirelessCard
+                behaviourCard
                 if let ambientTarget {
                     AmbientCard(target: ambientTarget, keyPath: PISetup.runKeyPath)
                 }
@@ -77,13 +78,13 @@ struct DeviceView: View {
                 withAnimation(.easeInOut(duration: 0.12)) { detailsOpen = true }
             }
         }
-        .alert("Flash the mote?", isPresented: $confirmFlash) {
+        .alert("Reinstall firmware?", isPresented: $confirmFlash) {
             Button("Cancel", role: .cancel) {}
-            Button("Flash", role: .destructive) {
+            Button("Reinstall", role: .destructive) {
                 Task { await model.flashFirmware() }
             }
         } message: {
-            Text("This replaces the animation firmware on \(flasher.selectedPort.isEmpty ? "the selected port" : flasher.selectedPort).")
+            Text("This replaces the firmware on \(flasher.selectedPort.isEmpty ? "the selected port" : flasher.selectedPort) with the version bundled in this app. Don't unplug the mote. Colours and behaviour settings are kept.")
         }
         .sheet(isPresented: $showProvision) {
             provisionSheet
@@ -510,6 +511,126 @@ struct DeviceView: View {
         .frame(width: 480)
     }
 
+    // MARK: - Behaviour
+
+    private var sensitivityBinding: Binding<Double> {
+        Binding(
+            get: { Double(model.shakeSensitivity) },
+            set: { model.shakeSensitivity = Int($0.rounded()) }
+        )
+    }
+
+    private var dizzyBinding: Binding<Double> {
+        Binding(
+            get: { model.dizzySeconds },
+            set: { model.dizzySeconds = $0 }
+        )
+    }
+
+    private var happyBinding: Binding<Double> {
+        Binding(
+            get: { model.happySeconds },
+            set: { model.happySeconds = $0 }
+        )
+    }
+
+    private var behaviourCard: some View {
+        Card {
+            VStack(alignment: .leading, spacing: 0) {
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("Behaviour")
+                        .font(Cue9Font.font(15.5, .semibold))
+                        .foregroundStyle(Cue9Theme.ink)
+                    Text("How the mote reacts to movement and touch.")
+                        .font(Cue9Font.font(12))
+                        .foregroundStyle(Cue9Theme.muted)
+                }
+
+                Divider()
+                    .overlay(Cue9Theme.line)
+                    .padding(.top, 15)
+
+                behaviourSlider(
+                    title: "Shake sensitivity",
+                    help: "How easily a shake triggers Dizzy. 1 is hardest, 5 is easiest.",
+                    scaleHint: "Left is harder; right is easier.",
+                    value: sensitivityBinding,
+                    range: 1...5,
+                    step: 1,
+                    readout: "\(model.shakeSensitivity) / 5",
+                    onCommit: { model.updateBehaviour(sensitivity: model.shakeSensitivity) }
+                )
+
+                behaviourSlider(
+                    title: "Dizzy duration",
+                    help: "How long Dizzy plays after a shake.",
+                    value: dizzyBinding,
+                    range: 2...10,
+                    step: 0.5,
+                    readout: String(format: "%.1f s", model.dizzySeconds),
+                    onCommit: { model.updateBehaviour(dizzySeconds: model.dizzySeconds) }
+                )
+
+                behaviourSlider(
+                    title: "Happy duration",
+                    help: "How long Happy plays after a stroke.",
+                    value: happyBinding,
+                    range: 1...4,
+                    step: 0.1,
+                    readout: String(format: "%.1f s", model.happySeconds),
+                    onCommit: { model.updateBehaviour(happySeconds: model.happySeconds) }
+                )
+
+                Text(model.dshOnline
+                     ? "Changes apply immediately. No reflash."
+                     : "Connect the DSH plugin to adjust these.")
+                    .font(Cue9Font.font(10.5))
+                    .foregroundStyle(model.dshOnline ? Cue9Theme.soft : Cue9Theme.warning)
+                    .padding(.top, 13)
+            }
+            .disabled(!model.dshOnline)
+            .opacity(model.dshOnline ? 1 : 0.55)
+        }
+    }
+
+    private func behaviourSlider(
+        title: String,
+        help: String,
+        scaleHint: String? = nil,
+        value: Binding<Double>,
+        range: ClosedRange<Double>,
+        step: Double,
+        readout: String,
+        onCommit: @escaping () -> Void
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 6) {
+                Text(title)
+                    .font(Cue9Font.font(12, .medium))
+                    .foregroundStyle(Cue9Theme.ink2)
+                Image(systemName: "info.circle")
+                    .font(.system(size: 9.5, weight: .medium))
+                    .foregroundStyle(Cue9Theme.soft)
+                    .help(help)
+                Spacer(minLength: 8)
+                Text(readout)
+                    .font(.system(size: 10.5, weight: .medium, design: .monospaced))
+                    .foregroundStyle(Cue9Theme.muted)
+            }
+            Slider(value: value, in: range, step: step) { editing in
+                if !editing { onCommit() }
+            }
+            .tint(Cue9Theme.orange)
+            .help(help)
+            if let scaleHint {
+                Text(scaleHint)
+                    .font(.system(size: 9.5))
+                    .foregroundStyle(Cue9Theme.soft)
+            }
+        }
+        .padding(.top, 13)
+    }
+
     // MARK: - Firmware
 
     private var portMenu: some View {
@@ -598,7 +719,7 @@ struct DeviceView: View {
                         Text("Firmware")
                             .font(Cue9Font.font(15.5, .semibold))
                             .foregroundStyle(Cue9Theme.ink)
-                        Text("The Wi-Fi + animation image. Flashing takes about a minute.")
+                        Text("The Wi-Fi + animation image. Reinstalling takes about a minute and keeps your colours and behaviour settings.")
                             .font(Cue9Font.font(12))
                             .foregroundStyle(Cue9Theme.muted)
                     }
@@ -607,7 +728,7 @@ struct DeviceView: View {
                         Button {
                             confirmFlash = true
                         } label: {
-                            Label(flasher.isFlashing ? "Flashing…" : "Flash firmware…", systemImage: "bolt.fill")
+                            Label(flasher.isFlashing ? "Reinstalling…" : "Reinstall firmware…", systemImage: "bolt.fill")
                         }
                         .buttonStyle(OutlineButtonStyle())
                         .disabled(flasher.isFlashing || flasher.selectedPort.isEmpty)

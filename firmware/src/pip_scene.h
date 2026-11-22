@@ -1,4 +1,4 @@
-/* pip_scene.h — the 17-state Pip scene (three typing takes), host/device buildable, no dependencies.
+/* pip_scene.h — the 21-state Pip scene (three typing takes), host/device buildable, no dependencies.
  *
  * Ports research/demo/pip.js: pose easing, blink, typing phase, rings, keyboard,
  * paws, props, labels, particles.  The scene emits into an r_dl (renderer/src/raster.h);
@@ -25,7 +25,8 @@ extern "C" {
 enum {
   PIP_WORK = 0, PIP_IDLE, PIP_CURIOUS, PIP_THINKING, PIP_SEARCH, PIP_READ,
   PIP_WAIT, PIP_SLEEP, PIP_WAKE, PIP_APPROVAL, PIP_MCQ, PIP_RETRY, PIP_DONE,
-  PIP_OFFLINE, PIP_HUB, PIP_WORK_CRAZY, PIP_WORK_ANNOYED, PIP_NSTATE
+  PIP_OFFLINE, PIP_HUB, PIP_WORK_CRAZY, PIP_WORK_ANNOYED,
+  PIP_DIZZY, PIP_TOOL_CALL, PIP_RUN_CMD, PIP_STROKED, PIP_NSTATE
 };
 
 #define PIP_POSE_N 14
@@ -38,7 +39,9 @@ typedef struct {
   bool charging;            /* charging bolt at the battery arc tip */
   bool rings;               /* false hides both rings (demo option) */
   bool effects;             /* false hides done's orbiting dots only */
-  int variant;              /* 0/1; flips the blep tongue side (pip.js:405) */
+  int variant;              /* 0/1; flips the blep tongue side. toolCall picks
+                             * its own take randomly on each scene reset. */
+  float stroke;             /* -1..1, happy gaze follows where the screen was stroked */
   int njob;                 /* 0..6 subagent arcs; 0 = no arcs (refs show none) */
   int agents;               /* 0..19 agents shown as coloured keyboard keys */
   r_rgb job[6];
@@ -58,6 +61,7 @@ typedef struct {
 
 typedef struct {
   uint32_t seed, rng;
+  uint32_t take_rng, take;   /* toolCall take; advances on every reset */
   float phase;              /* typing phase, advanced in the three typing states */
   float next_key;           /* next flying-key spawn time */
   float pose[PIP_POSE_N];

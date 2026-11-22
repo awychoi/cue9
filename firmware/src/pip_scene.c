@@ -23,7 +23,7 @@
 const char *const pip_state_names[PIP_NSTATE] = {
   "work", "idle", "curious", "thinking", "search", "read", "wait", "sleep",
   "wake", "approval", "mcq", "retry", "done", "offline", "hub",
-  "workCrazy", "workAnnoyed"
+  "workCrazy", "workAnnoyed", "dizzy", "toolCall", "runCmd", "stroked"
 };
 
 static const r_rgb C_BG     = { 5, 10, 14 };      /* #050a0e */
@@ -31,6 +31,8 @@ static const r_rgb C_CREASE = { 6, 17, 23 };      /* #061117 */
 static const r_rgb C_NOTE   = { 16, 28, 36 };     /* #101c24 */
 static const r_rgb C_HUB    = { 18, 36, 49 };     /* #122431 */
 static const r_rgb C_KEY    = { 8, 20, 27 };      /* #08141b */
+static const r_rgb C_SPIRAL = { 16, 35, 44 };     /* #10232c, inside a dissolved eye */
+static const r_rgb C_TERM   = { 6, 16, 21 };      /* #061015, command eye frame */
 static const r_rgb C_TRACK  = { 115, 140, 124 };
 static const r_rgb C_BAT_LO = { 237, 121, 119 };  /* #ed7977 */
 static const r_rgb C_BAT_MD = { 231, 194, 101 };  /* #e7c265 */
@@ -54,7 +56,11 @@ static const r_rgb PIP_COL[PIP_NSTATE] = {
   { 147, 165, 177 }, /* offline   #93a5b1 */
   { 241, 183, 128 }, /* hub       #f1b780 */
   { 100, 224, 236 }, /* workCrazy #64e0ec */
-  { 100, 224, 236 }  /* workAnnoyed #64e0ec */
+  { 100, 224, 236 }, /* workAnnoyed #64e0ec */
+  { 230, 168, 245 }, /* dizzy     #e6a8f5 */
+  { 122, 216, 245 }, /* toolCall  #7ad8f5 */
+  { 126, 240, 181 }, /* runCmd    #7ef0b5 */
+  { 255, 158, 199 }  /* stroked   #ff9ec7 */
 };
 
 /* pose slots, pip.js:285-286 (sleep is the 14th) */
@@ -612,6 +618,284 @@ static void hub_glyph(r_dl *dl, float t, r_rgb c) {
   r_pop(dl);
 }
 
+/* ---- dizzy / tool / command props ----------------------------------------- */
+/* 8-point star: 4 long points, 4 short, filling instead of a canvas glyph. */
+static void star_mark(r_dl *dl, float x, float y, float rad, float rot, r_rgb c,
+                      uint8_t a) {
+  float p[16];
+  for (int i = 0; i < 8; i++) {
+    float aa = (float)i * (PI_F * 0.25f) + rot;
+    float rr = (i & 1) ? rad * 0.4f : rad;
+    p[2 * i] = x + cosf(aa) * rr;
+    p[2 * i + 1] = y + sinf(aa) * rr;
+  }
+  fill_poly(dl, p, 8, c, a);
+}
+
+/* Dizzy eye: the eye pill with a dark spiral winding in from its edge. The
+ * spiral radius stays inside the pill, so the raster needs no clip. */
+static void spiral_eye(r_dl *dl, float x, float y, float w, float eh, float t,
+                       r_rgb c, uint8_t a) {
+  float rx = w * 0.7f, ry = eh * 0.48f;
+  float p[2 * 96];
+  int n = 0;
+  float rr = fminf(rx, ry) * 0.8f;
+  if (a == 0) return;
+  r_set_glow(dl, 2.5f);
+  fill_ell(dl, x, y, rx, ry, c, a);
+  r_set_glow(dl, 0.f);
+  for (int i = 0; i < 44; i++) {
+    float ang = (float)i * 0.36f + t * 0.8f;
+    float rad = (float)i / 44.f * rr;
+    n = push_pt(p, n, 96, x + cosf(ang) * rad, y + sinf(ang) * rad);
+  }
+  stroke_path(dl, p, n, 3.f * S, C_SPIRAL, a, false);
+}
+
+/* Command-line eye: a mini terminal where the eye was. No clip primitive, so
+ * rows are skipped near the frame's rounded top/bottom and their length is
+ * clamped to the frame's horizontal inset at that height. */
+static void cmd_eye(r_dl *dl, float x, float y, float w, float h, int side,
+                    float t, r_rgb c, uint8_t a) {
+  float bw = fmaxf(44.f, w * 1.12f), bh = fmaxf(44.f, h * 0.95f);
+  float rad = fminf(10.f, fminf(bw, bh) * 0.24f);
+  float speed = 3.2f, frac, x0, right;
+  float tt = t * speed + (side < 0 ? 0.f : 3.f);
+  int step = (int)floorf(tt), rows;
+  if (a == 0) return;
+  frac = modp(tt, 1.f);
+  r_push(dl);
+  r_translate(dl, x, y);
+  fill_rrect(dl, -bw * 0.5f, -bh * 0.5f, bw, bh, rad, C_TERM, a);
+  {
+    float p[2 * 40];
+    int n = rrect_path(p, 40, -bw * 0.5f, -bh * 0.5f, bw, bh, rad);
+    stroke_path(dl, p, n, 2.f * S, c, a, true);
+  }
+  x0 = -bw * 0.5f + 7.f;
+  right = bw * 0.5f - 6.f;
+  rows = (int)ceilf(bh / 9.f) + 1;
+  for (int i = 0; i < rows; i++) {
+    int idx = step + i;
+    float ly = -bh * 0.5f + 9.f + (float)i * 9.f - frac * 9.f;
+    float edge = fminf(ly + bh * 0.5f, bh * 0.5f - ly);
+    float inset = 0.f, len, p[8];
+    if (ly < -bh * 0.5f + 5.f || ly > bh * 0.5f - 5.f) continue;
+    if (edge < rad) {
+      float d = rad - edge;
+      inset = rad - sqrtf(fmaxf(0.f, rad * rad - d * d));
+    }
+    if (idx & 1) {
+      float sx = x0 + inset + 4.f;
+      len = 12.f + (float)((idx * 43 + (side < 0 ? 11 : 5)) % (int)(bw - 20.f));
+      if (len > right - sx) len = right - sx;
+      if (len < 3.f) continue;
+      p[0] = sx; p[1] = ly; p[2] = sx + len; p[3] = ly;
+      stroke_path(dl, p, 2, 1.9f * S, c, A(0.52f * a / 255.f), false);
+    } else {
+      float sx = x0 + inset;
+      len = 10.f + (float)((idx * 29 + (side < 0 ? 7 : 19)) % (int)(bw - 24.f));
+      if (len > right - sx - 7.f) len = right - sx - 7.f;
+      if (len < 4.f) continue;
+      p[0] = sx; p[1] = ly - 2.2f; p[2] = sx + 3.5f; p[3] = ly;
+      p[4] = sx; p[5] = ly + 2.2f;
+      stroke_path(dl, p, 3, 1.7f * S, c, a, false);
+      p[0] = sx + 7.f; p[1] = ly; p[2] = sx + 7.f + len; p[3] = ly;
+      stroke_path(dl, p, 2, 2.2f * S, c, A(0.95f * a / 255.f), false);
+    }
+  }
+  if (((int)floorf(t * 3.6f + (side < 0 ? 0.f : 0.5f))) % 2 == 0)
+    fill_rrect(dl, -bw * 0.5f + 8.f, bh * 0.5f - 13.f, 4.5f, 7.5f, 1.f, c, a);
+  r_pop(dl);
+}
+
+static void bolt_mark(r_dl *dl, float x, float y, float rot, r_rgb c) {
+  float p[12];
+  for (int i = 0; i < 6; i++) {
+    float aa = (float)i * TAU_F / 6.f + rot;
+    p[2 * i] = x + cosf(aa) * 13.f;
+    p[2 * i + 1] = y + sinf(aa) * 13.f;
+  }
+  fill_poly(dl, p, 6, c, A(0.18f));
+  stroke_path(dl, p, 6, 2.2f * S, c, 255, true);
+  ink(dl, c, 255);
+  r_fill_arc(dl, x, y, 5.f, 1.2f, 0.f, TAU_F);
+}
+
+static void wrench_prop(r_dl *dl, float x, float y, float ang, r_rgb c) {
+  float p[2 * 40];
+  int n = 0;
+  r_push(dl);
+  r_translate(dl, x, y);
+  r_rotate(dl, ang);
+  fill_rrect(dl, -5.f, -4.f, 52.f, 8.f, 3.f, c, A(0.22f));
+  {
+    float q[2 * 40];
+    int m = rrect_path(q, 40, -5.f, -4.f, 52.f, 8.f, 3.f);
+    stroke_path(dl, q, m, 1.6f * S, c, 255, true);
+  }
+  n = push_pt(p, n, 40, -8.f + 12.f * cosf(0.55f), 12.f * sinf(0.55f));
+  path_arc(p, &n, 40, -8.f, 0.f, 12.f, 0.55f, TAU_F - 0.55f, 18);
+  n = push_pt(p, n, 40, -4.f, -5.f);
+  n = push_pt(p, n, 40, -4.f, 5.f);
+  fill_poly(dl, p, n, c, A(0.25f));
+  stroke_path(dl, p, n, 2.f * S, c, 255, true);
+  fill_ell(dl, 45.f, 0.f, 4.f, 4.f, c, 255);
+  r_pop(dl);
+}
+
+static void hammer_prop(r_dl *dl, float x, float y, float ang, r_rgb c) {
+  float p[6];
+  r_push(dl);
+  r_translate(dl, x, y);
+  r_rotate(dl, ang);
+  fill_rrect(dl, -4.f, -42.f, 8.f, 48.f, 3.f, c, A(0.22f));
+  {
+    float q[2 * 40];
+    int m = rrect_path(q, 40, -4.f, -42.f, 8.f, 48.f, 3.f);
+    stroke_path(dl, q, m, 1.6f * S, c, 255, true);
+    m = rrect_path(q, 40, -18.f, -54.f, 36.f, 15.f, 4.f);
+    fill_rrect(dl, -18.f, -54.f, 36.f, 15.f, 4.f, c, A(0.32f));
+    stroke_path(dl, q, m, 1.6f * S, c, 255, true);
+  }
+  p[0] = 18.f; p[1] = -51.f; p[2] = 24.f; p[3] = -47.f; p[4] = 18.f; p[5] = -42.f;
+  stroke_path(dl, p, 3, 2.4f * S, c, 255, false);
+  r_pop(dl);
+}
+
+static void tool_props(r_dl *dl, float t, r_rgb c, int variant) {
+  if (variant % 2 == 0) {
+    float crank = sinf(t * 4.5f);
+    float bolt_rot = floorf(t * 4.5f / TAU_F) * 1.1f + fmaxf(0.f, crank) * 0.65f;
+    float w_ang = -0.35f + crank * 0.45f;
+    float px, py;
+    r_push(dl);
+    r_translate(dl, 180.f, 247.f);
+    fill_rrect(dl, -48.f, -17.f, 96.f, 34.f, 9.f, c, A(0.08f));
+    {
+      float q[2 * 40];
+      int n = rrect_path(q, 40, -48.f, -17.f, 96.f, 34.f, 9.f);
+      stroke_path(dl, q, n, 1.6f * S, c, A(0.65f), true);
+    }
+    bolt_mark(dl, -13.f, 0.f, bolt_rot, c);
+    r_pop(dl);
+    wrench_prop(dl, 171.f, 247.f, w_ang, c);
+    px = 171.f + cosf(w_ang) * 45.f;
+    py = 247.f + sinf(w_ang) * 45.f;
+    paw(dl, 112.f, 262.f, -1, 0.32f, c, 1.f, 0.92f);
+    paw(dl, px + 8.f, py + 8.f, 1, 0.42f, c, 1.f, 0.92f);
+    if (crank > 0.72f) {
+      for (int i = 0; i < 3; i++) {
+        float aa = -1.6f + (float)i * 0.65f;
+        float p[4];
+        p[0] = 166.f + cosf(aa) * 18.f; p[1] = 247.f + sinf(aa) * 18.f;
+        p[2] = 166.f + cosf(aa) * 28.f; p[3] = 247.f + sinf(aa) * 28.f;
+        stroke_path(dl, p, 2, 2.f * S, c, 255, false);
+      }
+    }
+  } else {
+    float cycle = modp(t * 2.4f, 1.f);
+    float swing = cycle < 0.35f ? mixf(0.3f, -1.15f, smf(cycle / 0.35f))
+                  : cycle < 0.5f ? mixf(-1.15f, 0.22f, smf((cycle - 0.35f) / 0.15f))
+                                 : mixf(0.22f, 0.3f, smf((cycle - 0.5f) / 0.5f));
+    int hit = cycle >= 0.47f && cycle < 0.68f;
+    r_push(dl);
+    r_translate(dl, 180.f, 257.f);
+    fill_rrect(dl, -38.f, -11.f, 76.f, 22.f, 5.f, c, A(0.16f));
+    {
+      float q[2 * 40];
+      int n = rrect_path(q, 40, -38.f, -11.f, 76.f, 22.f, 5.f);
+      stroke_path(dl, q, n, 1.6f * S, c, 255, true);
+    }
+    fill_rrect(dl, -7.f, -23.f, 14.f, 12.f, 2.f, c, A(0.3f));
+    {
+      float q[2 * 40];
+      int n = rrect_path(q, 40, -7.f, -23.f, 14.f, 12.f, 2.f);
+      stroke_path(dl, q, n, 1.4f * S, c, 255, true);
+    }
+    r_pop(dl);
+    hammer_prop(dl, 232.f, 248.f, swing, c);
+    paw(dl, 120.f, 266.f, -1, 0.3f, c, 1.f, 0.92f);
+    paw(dl, 232.f + sinf(swing) * 10.f, 248.f + cosf(swing) * 6.f, 1, 0.45f,
+        c, 1.f, 0.92f);
+    if (hit) {
+      float u = (cycle - 0.47f) / 0.21f;
+      for (int i = 0; i < 5; i++) {
+        float aa = -PI_F * 0.15f - (float)i * (PI_F * 0.7f / 4.f);
+        float d = 12.f + u * 24.f;
+        float p[4];
+        p[0] = 180.f + cosf(aa) * d * 0.6f;
+        p[1] = 233.f + sinf(aa) * d * 0.6f;
+        p[2] = 180.f + cosf(aa) * d;
+        p[3] = 233.f + sinf(aa) * d;
+        stroke_path(dl, p, 2, 2.2f * S, c, A(1.f - u), false);
+      }
+    }
+  }
+  text_c(dl, "FIXING", 180.f, 302.f, R_FONT_14, 110.f, c, A(0.75f));
+}
+
+static void run_cmd_props(r_dl *dl, float t, r_rgb c) {
+  float tl = fmaxf(0.f, sinf(t * 7.5f)) * 0.22f;
+  float tr = fmaxf(0.f, sinf(t * 7.5f + PI_F)) * 0.22f;
+  paw(dl, 124.f, 260.f - tl * 8.f, -1, 0.32f + tl, c, 1.f, 1.f);
+  paw(dl, 236.f, 260.f - tr * 8.f, 1, 0.32f + tr, c, 1.f, 1.f);
+  text_c(dl, "EXEC", 180.f, 276.f, R_FONT_10, 90.f, c, A(0.72f));
+}
+
+static void dizzy_props(r_dl *dl, float t, r_rgb c) {
+  float wobble = sinf(t * 5.5f) * 0.12f;
+  for (int i = 0; i < 3; i++) {
+    float ang = t * 3.2f + (float)i * (TAU_F / 3.f);
+    float sx = 180.f + cosf(ang) * 68.f;
+    float sy = 60.f + sinf(ang) * 13.f;
+    float sc = 0.75f + 0.35f * sinf(ang);
+    star_mark(dl, sx, sy, 7.5f * sc, t * 4.f + (float)i, c, A(0.85f));
+  }
+  text_c(dl, "@", 296.f + sinf(t * 4.f) * 3.f, 84.f + cosf(t * 4.f) * 3.f,
+         R_FONT_18, 30.f, c, A(0.85f));
+  paw(dl, 122.f + sinf(t * 6.f) * 6.f, 254.f + cosf(t * 6.f) * 4.f, -1,
+      0.35f + wobble, c, 1.f, 1.f);
+  paw(dl, 238.f - sinf(t * 6.f) * 6.f, 254.f - cosf(t * 6.f) * 4.f, 1,
+      0.35f - wobble, c, 1.f, 1.f);
+}
+
+/* small heart, local path from the prototype, scaled around (x,y) */
+static void heart_mark(r_dl *dl, float x, float y, float s, r_rgb c, float alpha) {
+  float p[2 * 40];
+  int n = 1;
+  p[0] = x;
+  p[1] = y + 5.f * s;
+  path_cubic(p, &n, 40, x, y + 5.f * s, x - 9.f * s, y - 2.f * s,
+             x - 10.f * s, y - 11.f * s, x - 4.f * s, y - 11.f * s, 6);
+  path_cubic(p, &n, 40, x - 4.f * s, y - 11.f * s, x - 1.f * s, y - 11.f * s,
+             x, y - 8.f * s, x, y - 6.f * s, 6);
+  path_cubic(p, &n, 40, x, y - 6.f * s, x, y - 8.f * s, x + 1.f * s,
+             y - 11.f * s, x + 4.f * s, y - 11.f * s, 6);
+  path_cubic(p, &n, 40, x + 4.f * s, y - 11.f * s, x + 10.f * s, y - 11.f * s,
+             x + 9.f * s, y - 2.f * s, x, y + 5.f * s, 6);
+  fill_poly(dl, p, n, c, A(alpha));
+}
+
+/* Happy (stroked): blush, floating hearts, kneading paws and a purr label. */
+static void stroked_props(r_dl *dl, float t, r_rgb c, int effects) {
+  float knL = sinf(t * 5.2f) * 0.5f + 0.5f;
+  float knR = sinf(t * 5.2f + PI_F) * 0.5f + 0.5f;
+  fill_ell(dl, 104.f, 174.f, 16.f, 8.f, c, A(0.38f));
+  fill_ell(dl, 256.f, 174.f, 16.f, 8.f, c, A(0.38f));
+  if (effects) {
+    for (int i = 0; i < 3; i++) {
+      float u = modp(t * 0.55f + (float)i * 0.33f, 1.f);
+      float hx = 180.f + ((float)i - 1.f) * 58.f + sinf(t * 3.f + (float)i * 2.f) * 10.f;
+      float hy = 122.f - u * 62.f;
+      heart_mark(dl, hx, hy, 0.75f + u * 0.4f, c, sinf(u * PI_F) * 0.9f);
+    }
+  }
+  paw(dl, 126.f, 258.f - knL * 10.f, -1, 0.35f + knL * 0.2f, c, 1.f, 1.f);
+  paw(dl, 234.f, 258.f - knR * 10.f, 1, 0.35f + knR * 0.2f, c, 1.f, 1.f);
+  text_c(dl, "purr~", 180.f, 272.f, R_FONT_14, 90.f, c, A(0.82f));
+}
+
 /* ---- rings (screen space, pip.js:253-282) --------------------------------- */
 static void draw_rings(r_dl *dl, const pip_opts *o, float angle) {
   float batt = o->battery;
@@ -656,7 +940,7 @@ static void draw_rings(r_dl *dl, const pip_opts *o, float angle) {
 }
 
 /* ---- pose targets (pip.js:288-328) ---------------------------------------- */
-static void target_pose(int st, float t, float phase, float *q) {
+static void target_pose(int st, float t, float phase, int variant, float stroke_x, float *q) {
   static const float rest[PIP_POSE_N] = { 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0 };
   memcpy(q, rest, sizeof(rest));
   switch (st) {
@@ -780,6 +1064,45 @@ static void target_pose(int st, float t, float phase, float *q) {
       /* Keep the hub face still; the eyes are fixed lines, not animated pills. */
       q[P_O] = 0.55f;
       break;
+    case PIP_DIZZY: {
+      /* Spiral eyes, wobbling head and a short settle right after the shake. */
+      float settle = t < 0.55f ? sinf(t * 55.f) * 0.12f * (1.f - t / 0.55f) : 0.f;
+      q[P_OPEN] = 1.02f;
+      q[P_GX] = sinf(t * 7.f) * 8.f;
+      q[P_GY] = cosf(t * 6.f) * 5.f;
+      q[P_TILT] = sinf(t * 5.2f) * 0.14f + settle;
+      q[P_Y] = sinf(t * 6.5f) * 4.f;
+      q[P_O] = 0.55f;
+      q[P_SQUASH] = 1.f + sinf(t * 8.f) * 0.02f;
+      break;
+    }
+    case PIP_TOOL_CALL: {
+      int hammer = variant % 2 == 1;
+      q[P_OPEN] = hammer ? 0.88f : 0.82f;
+      q[P_GX] = hammer ? 4.f : sinf(t * 4.5f) * 4.f;
+      q[P_GY] = 9.f;
+      q[P_ASYM] = 0.1f * sinf(t * 3.2f);
+      q[P_TILT] = hammer ? sinf(t * 2.4f * TAU_F) * 0.05f
+                         : sinf(t * 2.5f) * 0.05f;
+      q[P_Y] = hammer ? fmaxf(0.f, sinf(t * 2.4f * TAU_F)) * 3.f
+                      : -fabsf(sinf(t * 3.2f)) * 2.f;
+      break;
+    }
+    case PIP_RUN_CMD:
+      q[P_OPEN] = 0.96f;
+      q[P_GX] = sinf(t * 1.8f) * 2.f;
+      q[P_TILT] = sinf(t * 2.1f) * 0.03f;
+      q[P_Y] = sinf(t * 4.2f) * 1.5f;
+      break;
+    case PIP_STROKED:
+      /* Blissful eyes, gaze toward the stroke, purr bounce and squash. */
+      q[P_HAPPY] = 1.f;
+      q[P_GX] = stroke_x * 10.f;
+      q[P_GY] = -2.f;
+      q[P_TILT] = stroke_x * 0.11f;
+      q[P_Y] = -fabsf(sinf(t * 4.5f)) * 3.5f;
+      q[P_SQUASH] = 1.f + sinf(t * 9.f) * 0.025f;
+      break;
     default: break;
   }
 }
@@ -794,12 +1117,15 @@ void pip_scene_init(pip_scene *s, uint32_t seed) {
   if (!s) return;
   memset(s, 0, sizeof(*s));
   s->seed = seed ? seed : 0xC0FFEEu;
+  s->take_rng = s->seed * 2654435761u + 0x9E3779B9u;
   pip_scene_reset(s);
 }
 
 void pip_scene_reset(pip_scene *s) {
   if (!s) return;
   s->rng = s->seed;
+  if (s->take_rng == 0) s->take_rng = 0x9E3779B9u;
+  s->take = (xs32(&s->take_rng) >> 16) & 1u;   /* toolCall alternates wrench/hammer */
   s->phase = 0.f;
   s->next_key = 0.f;
   s->nkey = 0;
@@ -845,11 +1171,11 @@ int pip_scene_frame(r_dl *dl, pip_scene *s, int state, float t, float dt,
   if (!(dt >= 0.f)) dt = 0.f;
   if (dt > 0.25f) dt = 0.25f;
   if (!opt) { pip_opts_default(&def); opt = &def; }
-  variant = opt->variant;
+  variant = state == PIP_TOOL_CALL ? (int)s->take : opt->variant;
 
   if (is_typing_state(state))
     s->phase += dt * typing_rate(state) * TAU_F;
-  target_pose(state, t, s->phase, q);
+  target_pose(state, t, s->phase, variant, opt->stroke, q);
   k = 1.f - expf(-10.f * dt);
   for (int i = 0; i < PIP_POSE_N; i++)
     s->pose[i] = s->pose_init ? s->pose[i] + (q[i] - s->pose[i]) * k : q[i];
@@ -977,7 +1303,11 @@ int pip_scene_frame(r_dl *dl, pip_scene *s, int state, float t, float dt,
     float eh = fminf(116.f, fmaxf(3.f, 78.f * opening * (1.f - blink)));
     int happy = pose[P_HAPPY] > 0.65f && state != PIP_HUB;
     int closed = pose[P_SLEEP] > 0.7f;
-    if (happy) {
+    if (state == PIP_RUN_CMD && eh > 5.f) {
+      cmd_eye(dl, ex, ey, 42.f, eh, (int)side, t, col, ea);
+    } else if (state == PIP_DIZZY && eh > 5.f) {
+      spiral_eye(dl, ex, ey, 42.f, eh, t, col, ea);
+    } else if (happy) {
       arch_eye(dl, ex, ey, 49.f, col, 10.5f, 9.f, ea);
     } else if (closed) {
       arch_eye(dl, ex, ey, 42.f, col, 5.f, 5.f, ea);
@@ -1128,6 +1458,10 @@ int pip_scene_frame(r_dl *dl, pip_scene *s, int state, float t, float dt,
   }
   if (state == PIP_OFFLINE)
     text_c(dl, "OFFLINE", 180.f, 262.f, R_FONT_18, 160.f, col, A(0.85f));
+  if (state == PIP_DIZZY) dizzy_props(dl, t, col);
+  if (state == PIP_TOOL_CALL) tool_props(dl, t, col, variant);
+  if (state == PIP_RUN_CMD) run_cmd_props(dl, t, col);
+  if (state == PIP_STROKED) stroked_props(dl, t, col, opt->effects);
 
   /* 7. flying-key particles, last inside the scene (pip.js:521-539) */
   if (is_typing_state(state) && t >= s->next_key) {

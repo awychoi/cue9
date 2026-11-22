@@ -26,6 +26,17 @@ Copyright © 2023–2024 Espressif Systems (Shanghai) CO LTD.
 
 Licensed under the Apache License, Version 2.0.
 
+## Espressif bmi270_sensor
+
+The firmware includes the
+[ESP BMI270 sensor component](https://components.espressif.com/components/espressif/bmi270_sensor),
+version 0.4.1. It carries Bosch Sensortec's BMI270 driver (BSD 3-Clause) and
+Espressif's precompiled sensor firmware and glue code (Apache License 2.0).
+
+Copyright © 2025 Bosch Sensortec GmbH.
+
+Copyright © Espressif Systems (Shanghai) CO LTD.
+
 ## Inter
 
 The macOS app bundles the Inter typeface.
@@ -37,7 +48,7 @@ Licensed under the SIL Open Font License, Version 1.1. The full text is in
 
 ## Apache License 2.0
 
-The following license applies to ESP-IDF and esp_lcd_st77916.
+The following license applies to ESP-IDF, esp_lcd_st77916, and the Espressif part of bmi270_sensor.
 
 ```text
 
@@ -243,4 +254,41 @@ The following license applies to ESP-IDF and esp_lcd_st77916.
    See the License for the specific language governing permissions and
    limitations under the License.
 
+```
+
+## BSD 3-Clause License
+
+The following license applies to Bosch Sensortec's BMI270 driver in bmi270_sensor.
+
+```text
+BSD 3-Clause License
+
+Copyright (c) 2025 Bosch Sensortec GmbH. All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright
+   notice, this list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright
+   notice, this list of conditions and the following disclaimer in the
+   documentation and/or other materials provided with the distribution.
+
+3. Neither the name of the copyright holder nor the names of its
+   contributors may be used to endorse or promote products derived from
+   this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+"AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
+FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
+COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
+INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+(INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
+STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING
+IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+POSSIBILITY OF SUCH DAMAGE.
 ```

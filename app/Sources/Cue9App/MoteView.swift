@@ -20,6 +20,7 @@ struct MoteView: View {
 
     private var mapped: [String] { model.mapping[model.selectedAction] ?? [] }
     private var mappedCount: Int { mapped.count }
+    private var selectedIsDeviceOnly: Bool { model.isDeviceOnly(model.selectedAnimation) }
     private var isUnmapped: Bool { mapped.isEmpty }
     private var unmappedCount: Int { model.actions.count - model.mappedActionCount }
 
@@ -61,7 +62,14 @@ struct MoteView: View {
     private var canTestColour: Bool {
         model.dshOnline
             && model.usbConnected
-            && colourAction != nil
+            && (colourAction != nil || selectedIsDeviceOnly)
+            && model.testState != .sending
+    }
+
+    private var canPlayDevice: Bool {
+        model.dshOnline
+            && model.usbConnected
+            && !model.selectedAnimation.isEmpty
             && model.testState != .sending
     }
 
@@ -454,7 +462,7 @@ struct MoteView: View {
                         ],
                         spacing: 5
                     ) {
-                        ForEach(model.animations) { animation in
+                        ForEach(model.mappableAnimations) { animation in
                             AnimationTileView(
                                 animation: animation,
                                 color: model.palette[animation.id]?.color ?? animation.color.color,
@@ -474,16 +482,94 @@ struct MoteView: View {
                 .frame(maxHeight: .infinity)
             }
 
+            if !model.deviceAnimations.isEmpty {
+                deviceReactions
+                    .padding(.top, 10)
+            }
+
             footer(
-                testTitle: "Test on mote",
-                testEnabled: canTestMapping,
-                hint: mappingCaption,
+                testTitle: selectedIsDeviceOnly ? "Play on mote" : "Test on mote",
+                testEnabled: selectedIsDeviceOnly ? canPlayDevice : canTestMapping,
+                hint: selectedIsDeviceOnly ? deviceCaption : mappingCaption,
                 returnNamespace: returnLiveNamespace,
                 action: {
-                    model.previewAction(model.selectedAction, animation: model.selectedAnimation)
+                    if selectedIsDeviceOnly {
+                        model.previewDeviceAnimation(model.selectedAnimation)
+                    } else {
+                        model.previewAction(model.selectedAction, animation: model.selectedAnimation)
+                    }
                 }
             )
         }
+    }
+
+    private var deviceReactions: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 7) {
+                SectionLabel(text: "Device reactions")
+                Text("ON DEVICE")
+                    .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                    .tracking(0.8)
+                    .foregroundStyle(Cue9Theme.soft)
+                Spacer(minLength: 4)
+            }
+            HStack(spacing: 5) {
+                ForEach(model.deviceAnimations) { animation in
+                    deviceReactionChip(animation)
+                }
+            }
+            Text("Plays on the mote from its own sensors. Preview and recolour here; it cannot be mapped to a DSH action.")
+                .font(Cue9Font.font(9.5))
+                .foregroundStyle(Cue9Theme.soft)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private func deviceReactionChip(_ animation: CueAnimation) -> some View {
+        let selected = model.selectedAnimation == animation.id
+        let trigger = animation.id == "dizzy" ? "Shake"
+            : animation.id == "stroked" ? "Stroke"
+            : "On device"
+        return Button {
+            model.selectAnimation(animation.id)
+        } label: {
+            VStack(alignment: .leading, spacing: 1) {
+                HStack(spacing: 5) {
+                    Circle()
+                        .fill(model.palette[animation.id]?.color ?? animation.color.color)
+                        .frame(width: 6, height: 6)
+                    Text(animation.label)
+                        .font(Cue9Font.font(10.5, .medium))
+                        .foregroundStyle(selected ? Cue9Theme.ink : Cue9Theme.ink2)
+                        .lineLimit(1)
+                }
+                Text(trigger)
+                    .font(Cue9Font.font(9))
+                    .foregroundStyle(Cue9Theme.soft)
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 6)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                selected ? Cue9Theme.surface2 : Cue9Theme.paper,
+                in: RoundedRectangle(cornerRadius: 7, style: .continuous)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .stroke(selected ? Cue9Theme.orange.opacity(0.7) : Cue9Theme.line, lineWidth: 1)
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("\(animation.label): \(trigger.lowercased()) on the mote. Preview and recolour here; not mappable.")
+        .accessibilityLabel("Preview \(animation.label)")
+        .accessibilityValue(selected ? "Selected. Device reaction, not mappable." : "Device reaction, not mappable.")
+    }
+
+    private var deviceCaption: String {
+        if !model.dshOnline { return "Connect the DSH plugin in Device." }
+        if !model.usbConnected { return "The mote isn't connected." }
+        return "Plays \(model.selectedAnimationTitle) on the mote with these colours."
     }
 
     private var actionMenu: some View {
@@ -625,8 +711,11 @@ struct MoteView: View {
                 hint: colourCaption,
                 returnNamespace: returnLiveNamespace,
                 action: {
-                    guard let action = colourAction else { return }
-                    model.previewAction(action, animation: model.selectedAnimation)
+                    if selectedIsDeviceOnly {
+                        model.previewDeviceAnimation(model.selectedAnimation)
+                    } else if let action = colourAction {
+                        model.previewAction(action, animation: model.selectedAnimation)
+                    }
                 }
             )
         }
@@ -720,7 +809,12 @@ struct MoteView: View {
     private var usedByLine: some View {
         let actions = model.usedByActions(for: model.selectedAnimation)
         return Group {
-            if actions.isEmpty {
+            if selectedIsDeviceOnly {
+                Text(model.selectedAnimation == "dizzy"
+                     ? "Device reaction · plays when you shake the mote."
+                     : "Device reaction · plays when you stroke the screen.")
+                    .foregroundStyle(Cue9Theme.soft)
+            } else if actions.isEmpty {
                 Text("Not used by an action yet.")
                     .foregroundStyle(Cue9Theme.warning)
             } else {
@@ -735,6 +829,9 @@ struct MoteView: View {
     private var colourCaption: String {
         if !model.dshOnline { return "Connect the DSH plugin in Device." }
         if !model.usbConnected { return "The mote isn't connected." }
+        if selectedIsDeviceOnly {
+            return "Plays \(model.selectedAnimationTitle) on the mote with expression #\(inkHex) on background #\(backgroundHex)."
+        }
         if colourAction == nil { return "Map this animation to an action first." }
         return "Sends \(model.selectedAnimationTitle) with expression #\(inkHex) on background #\(backgroundHex)."
     }
@@ -801,6 +898,7 @@ struct MoteView: View {
 
     private func ensureMappingSelection() {
         guard !model.selectedAction.isEmpty else { return }
+        if model.isDeviceOnly(model.selectedAnimation) { return }
         let currentMapping = model.mapping[model.selectedAction] ?? []
         if !currentMapping.contains(model.selectedAnimation),
            let first = currentMapping.first ?? model.animations.first?.id {

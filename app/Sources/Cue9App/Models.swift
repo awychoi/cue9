@@ -5,6 +5,8 @@ struct CueAnimation: Identifiable, Hashable {
     let id: String
     let label: String
     let color: RGB
+    /// Sensor-triggered faces: previewable and colourable, never mapped.
+    var deviceOnly: Bool = false
 }
 
 struct CueAction: Identifiable, Hashable {
@@ -42,7 +44,7 @@ enum CueCatalog {
     static let rendererOrder = [
         "work", "idle", "curious", "thinking", "search", "read", "wait",
         "sleep", "wake", "approval", "mcq", "retry", "done", "offline", "hub",
-        "workCrazy", "workAnnoyed",
+        "workCrazy", "workAnnoyed", "dizzy", "toolCall", "runCmd", "stroked",
     ]
 
     static let animationColors: [String: RGB] = [
@@ -63,6 +65,10 @@ enum CueCatalog {
         "hub": RGB(r: 241, g: 183, b: 128),
         "workCrazy": RGB(r: 100, g: 224, b: 236),
         "workAnnoyed": RGB(r: 100, g: 224, b: 236),
+        "dizzy": RGB(r: 230, g: 168, b: 245),
+        "toolCall": RGB(r: 122, g: 216, b: 245),
+        "runCmd": RGB(r: 126, g: 240, b: 181),
+        "stroked": RGB(r: 255, g: 158, b: 199),
     ]
 
     static let defaultBackground = RGB(r: 5, g: 10, b: 14)
@@ -105,8 +111,14 @@ enum CuePaths {
     }
 
     static var mapping: URL { support.appendingPathComponent("mapping.json") }
-    static var palette: URL { support.appendingPathComponent("palette.json") }
-    static var backgrounds: URL { support.appendingPathComponent("backgrounds.json") }
+    /// App-owned colour store. The plugin's palette.json/backgrounds.json are
+    /// only a mirror it keeps for the firmware.
+    static var palette: URL { support.appendingPathComponent("colours.json") }
+    static var paletteBackup: URL { support.appendingPathComponent("colours.backup.json") }
+    static var backgrounds: URL { support.appendingPathComponent("colour-backgrounds.json") }
+    static var backgroundsBackup: URL { support.appendingPathComponent("colour-backgrounds.backup.json") }
+    static var legacyPalette: URL { support.appendingPathComponent("palette.json") }
+    static var legacyBackgrounds: URL { support.appendingPathComponent("backgrounds.json") }
     static var history: URL { support.appendingPathComponent("history.json") }
     static var catalog: URL { support.appendingPathComponent("catalog.json") }
     static var piSummary: URL { support.appendingPathComponent("pi.json") }
