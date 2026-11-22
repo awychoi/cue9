@@ -4,9 +4,11 @@
 
 #define RAW_PER_G 8192.0f
 #define GRAVITY_ALPHA 0.02f     /* ~0.5 s at the 100 Hz sample rate */
-#define SHAKE_REVS 3
-#define SHAKE_WINDOW_US 1500000LL
-#define SHAKE_MIN_SWING_US 80000LL
+#define SHAKE_SWINGS 6
+#define SHAKE_WINDOW_US 3000000LL
+#define SHAKE_MAX_GAP_US 800000LL
+#define SHAKE_IDLE_RESET_US 1000000LL
+#define SHAKE_MIN_SWING_US 120000LL
 #define SHAKE_COOLDOWN_US 2000000LL
 #define REVERSAL_DOT -0.35f     /* about 110 degrees from the last swing */
 
@@ -33,6 +35,28 @@ void shake_init(shake_detector *s, int sensitivity)
     shake_set_sensitivity(s, sensitivity);
 }
 
+/* Count one established swing. Six swings inside the window, with no gap
+ * longer than 0.8 s, trigger dizzy. */
+static bool count_swing(shake_detector *s, int64_t now_us)
+{
+    if (s->swing_count > 0 &&
+        (now_us - s->last_swing_us > SHAKE_MAX_GAP_US ||
+         now_us - s->first_swing_us > SHAKE_WINDOW_US)) {
+        s->swing_count = 0;
+    }
+    if (s->swing_count == 0) s->first_swing_us = now_us;
+    s->last_swing_us = now_us;
+    s->swing_count++;
+    s->swing_total++;
+
+    if (s->swing_count >= SHAKE_SWINGS) {
+        s->swing_count = 0;
+        s->cooldown_until_us = now_us + SHAKE_COOLDOWN_US;
+        return true;
+    }
+    return false;
+}
+
 bool shake_feed(shake_detector *s, int x, int y, int z, int64_t now_us)
 {
     float ax = (float)x, ay = (float)y, az = (float)z;
@@ -40,6 +64,7 @@ bool shake_feed(shake_detector *s, int x, int y, int z, int64_t now_us)
         s->gx = ax;
         s->gy = ay;
         s->gz = az;
+        s->last_active_us = now_us;
         s->seeded = true;
         return false;
     }
@@ -55,8 +80,16 @@ bool shake_feed(shake_detector *s, int x, int y, int z, int64_t now_us)
 
     if (dyn2 < s->thr2) {
         s->in_swing = false;
+        /* A pause means the next movement is the start of a new shake. */
+        if (s->have_dir &&
+            now_us - s->last_active_us > SHAKE_IDLE_RESET_US) {
+            s->have_dir = false;
+            s->swing_count = 0;
+        }
         return false;
     }
+    s->last_active_us = now_us;
+
     if (!s->in_swing) {
         s->in_swing = true;
         s->swing_start_us = now_us;
@@ -71,7 +104,8 @@ bool shake_feed(shake_detector *s, int x, int y, int z, int64_t now_us)
         s->ldy = dy;
         s->ldz = dz;
         s->have_dir = true;
-        return false;
+        if (now_us < s->cooldown_until_us) return false;
+        return count_swing(s, now_us);
     }
 
     float lmag = sqrtf(s->ldx * s->ldx + s->ldy * s->ldy + s->ldz * s->ldz);
@@ -90,24 +124,5 @@ bool shake_feed(shake_detector *s, int x, int y, int z, int64_t now_us)
     s->ldz = dz;
 
     if (now_us < s->cooldown_until_us) return false;
-    if (s->rev_count > 0 && now_us - s->rev_us[s->rev_count - 1] > SHAKE_WINDOW_US) {
-        s->rev_count = 0;
-    }
-
-    s->rev_total++;
-    if (s->rev_count < SHAKE_REVS) {
-        s->rev_us[s->rev_count++] = now_us;
-    } else {
-        s->rev_us[0] = s->rev_us[1];
-        s->rev_us[1] = s->rev_us[2];
-        s->rev_us[2] = now_us;
-    }
-
-    if (s->rev_count >= SHAKE_REVS &&
-        now_us - s->rev_us[0] <= SHAKE_WINDOW_US) {
-        s->rev_count = 0;
-        s->cooldown_until_us = now_us + SHAKE_COOLDOWN_US;
-        return true;
-    }
-    return false;
+    return count_swing(s, now_us);
 }

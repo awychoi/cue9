@@ -3,7 +3,14 @@ import SwiftUI
 
 @MainActor
 enum Snapshot {
-    static func write(model: AppModel, section: AppSection, appearance: AppearanceMode, to path: String) {
+    static func write(
+        model: AppModel,
+        section: AppSection,
+        appearance: AppearanceMode,
+        width: CGFloat = 1280,
+        height: CGFloat = 800,
+        to path: String
+    ) {
         Cue9Font.register()
 
         let defaults = UserDefaults.standard
@@ -18,9 +25,9 @@ enum Snapshot {
         }
 
         let view = RootView(model: model, initialSection: section)
-            .frame(width: 1280, height: 800)
+            .frame(width: width, height: height)
         let hosting = NSHostingView(rootView: view)
-        hosting.frame = NSRect(x: 0, y: 0, width: 1280, height: 800)
+        hosting.frame = NSRect(x: 0, y: 0, width: width, height: height)
         hosting.appearance = appearance.nsAppearance ?? NSApp.effectiveAppearance
         hosting.layoutSubtreeIfNeeded()
 

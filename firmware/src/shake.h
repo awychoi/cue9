@@ -8,18 +8,21 @@
  * The accelerometer reports gravity plus motion. A slow per-axis low-pass
  * removes gravity, leaving the dynamic vector. A deliberate shake makes the
  * vector swing one way, then the other. A swing only counts when it stays
- * above a low gate for at least 80 ms, so a bump or a stroke cannot produce
- * the three opposing swings that trigger. Three swings inside 1.5 s trigger.
+ * above a low gate for at least 120 ms, so a bump or a stroke cannot produce
+ * the six alternating swings that trigger. Six swings (left, right, left,
+ * right, left, right) must land within 3 s, no more than 0.8 s apart.
  */
 typedef struct {
     float gx, gy, gz;       /* gravity estimate, raw counts */
     float thr2;             /* squared gate threshold, raw counts^2 */
-    float ldx, ldy, ldz;    /* direction of the last qualified swing */
+    float ldx, ldy, ldz;    /* direction of the last counted swing */
     int64_t swing_start_us;
-    int64_t rev_us[3];      /* timestamps of the latest three reversals */
+    int64_t first_swing_us;
+    int64_t last_swing_us;
+    int64_t last_active_us;
     int64_t cooldown_until_us;
-    int rev_count;
-    uint32_t rev_total;
+    int swing_count;
+    uint32_t swing_total;
     bool have_dir;
     bool in_swing;
     bool seeded;

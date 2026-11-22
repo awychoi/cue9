@@ -96,15 +96,15 @@ enum AmbientError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .noTarget:
-            return "No Pi is configured. Set up the Pi first."
+            return "The bridge isn't set up. Open Connect to set it up."
         case .noKey:
-            return "The cue9 SSH key is missing. Set up the Pi first."
+            return "The cue9 key is missing. Set up the Raspberry Pi in Connect."
         case .ssh(let detail):
-            return "Could not reach the Pi.\n\(detail)"
+            return "Could not reach the Raspberry Pi.\n\(detail)"
         case .timedOut:
-            return "The Pi did not answer in time."
+            return "The Raspberry Pi did not answer in time."
         case .badReply(let detail):
-            return "The Pi sent something unexpected.\n\(detail)"
+            return "The Raspberry Pi sent something unexpected.\n\(detail)"
         case .rejected(let detail):
             return detail
         case .geo(let detail):

@@ -6,8 +6,9 @@ final class Cue9AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var window: NSWindow?
     private var model = AppModel()
     private var snapshotPath: String?
-    private var snapshotSection: AppSection = .mote
+    private var snapshotSection: AppSection = .now
     private var snapshotAppearance: AppearanceMode = .dark
+    private var snapshotSize = CGSize(width: 1280, height: 800)
     private var appearanceObserver: NSObjectProtocol?
 
     deinit {
@@ -19,6 +20,9 @@ final class Cue9AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         Cue9Font.register()
         parseSnapshotArguments()
+        if CommandLine.arguments.contains("--snapshot-offline") {
+            model.makeOfflineForSnapshot()
+        }
         installMainMenu()
         installAppearanceObserver()
         if let snapshotPath {
@@ -28,6 +32,8 @@ final class Cue9AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     model: model,
                     section: self.snapshotSection,
                     appearance: self.snapshotAppearance,
+                    width: self.snapshotSize.width,
+                    height: self.snapshotSize.height,
                     to: snapshotPath
                 )
                 NSApp.terminate(nil)
@@ -107,7 +113,8 @@ final class Cue9AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if let sectionIndex = CommandLine.arguments.firstIndex(of: "--snapshot-section"),
            CommandLine.arguments.count > sectionIndex + 1,
            let parsed = AppSection.allCases.first(where: {
-               $0.rawValue.lowercased() == CommandLine.arguments[sectionIndex + 1].lowercased()
+               $0.cliName == CommandLine.arguments[sectionIndex + 1].lowercased()
+                   || $0.rawValue.lowercased() == CommandLine.arguments[sectionIndex + 1].lowercased()
            }) {
             snapshotSection = parsed
         }
@@ -115,6 +122,16 @@ final class Cue9AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
            CommandLine.arguments.count > appearanceIndex + 1,
            let parsed = AppearanceMode(rawValue: CommandLine.arguments[appearanceIndex + 1].lowercased()) {
             snapshotAppearance = parsed
+        }
+        if let widthIndex = CommandLine.arguments.firstIndex(of: "--snapshot-width"),
+           CommandLine.arguments.count > widthIndex + 1,
+           let width = Double(CommandLine.arguments[widthIndex + 1]) {
+            snapshotSize.width = width
+        }
+        if let heightIndex = CommandLine.arguments.firstIndex(of: "--snapshot-height"),
+           CommandLine.arguments.count > heightIndex + 1,
+           let height = Double(CommandLine.arguments[heightIndex + 1]) {
+            snapshotSize.height = height
         }
     }
 

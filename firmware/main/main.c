@@ -32,6 +32,7 @@
 #include "pip_scene.h"
 #include "ambient.h"
 #include "shake.h"
+#include "stroke.h"
 #include "cue9_config.h"
 #include "cue9_wifi.h"
 #include "bmi270_api.h"
@@ -133,8 +134,8 @@ static i2c_master_bus_handle_t s_i2c_bus;
 static i2c_master_dev_handle_t s_gauge_dev;
 static i2c_master_dev_handle_t s_touch_dev;
 
-/* BMI270 at 0x68. A shake posts a timestamp; the frame loop turns that into
- * a local dizzy scene. Absent IMU means this stays inert. */
+/* BMI270 at 0x68. Six alternating swings post a timestamp; the frame loop
+ * turns that into a local dizzy scene. Absent IMU means this stays inert. */
 static bmi270_handle_t s_bmi;
 static volatile int64_t s_shake_us;
 static shake_detector s_shake;
@@ -147,11 +148,12 @@ static shake_detector s_shake;
 static volatile int64_t s_dizzy_us = DIZZY_DEFAULT_US;
 static volatile int64_t s_happy_us = HAPPY_DEFAULT_US;
 
-/* Stroking the screen: a slow drag, not a flick, posts a happy timestamp. */
+/* Three alternating back-and-forth passes post a happy timestamp. One swipe
+ * or one return pass is not enough, so a page flick cannot trigger it. Any
+ * start point and stroke direction work; thresholds live in stroke.c. */
 static volatile int64_t s_stroke_us;
 static volatile float s_stroke_x;
-#define STROKE_MIN_PATH 55.f
-#define STROKE_MIN_US 220000LL
+#define STROKE_REFRESH_US 250000LL
 
 #define CST816_ADDR 0x15
 #define CST816_REG_POINTS 0x02
@@ -239,7 +241,7 @@ static void gauge_task(void *arg)
 }
 
 /* Core 0: BMI270 shake. Samples at the sensor's 100 Hz rate and feeds the
- * dynamic-acceleration detector: three swings in one burst trigger dizzy.
+ * dynamic-acceleration detector: six alternating swings trigger dizzy.
  * Gravity is removed first, so a shake counts in any direction and the
  * detector re-arms at each reversal instead of waiting for the device to
  * come to rest. */
@@ -267,13 +269,13 @@ static void imu_task(void *arg)
                 ESP_LOGI(TAG, "IMU acc %d %d %d", (int)cur.acc.x, (int)cur.acc.y,
                          (int)cur.acc.z);
             }
-            uint32_t revs_before = s_shake.rev_total;
+            uint32_t swings_before = s_shake.swing_total;
             if (shake_feed(&s_shake, (int)cur.acc.x, (int)cur.acc.y,
                            (int)cur.acc.z, now)) {
                 s_shake_us = now;
                 ESP_LOGI(TAG, "shake trigger");
-            } else if (s_shake.rev_total != revs_before) {
-                ESP_LOGI(TAG, "shake reversal %d", s_shake.rev_count);
+            } else if (s_shake.swing_total != swings_before) {
+                ESP_LOGI(TAG, "shake swing %d", s_shake.swing_count);
             }
         }
         vTaskDelay(pdMS_TO_TICKS(10));
@@ -309,9 +311,8 @@ static bool imu_init(void)
     return true;
 }
 
-/* Core 0: CST816S swipe. Reads points/x/y in one transaction and turns a
- * mostly-horizontal drag into a page step on release. The controller reports
- * before and after sleep on its own; no reset or config is needed here. */
+/* Core 0: CST816S touch. Polls points and x/y; a deliberate back-and-forth
+ * rub (stroke.c) posts happy, while a page flick still steps a page. */
 static void touch_task(void *arg)
 {
     (void)arg;
@@ -323,9 +324,9 @@ static void touch_task(void *arg)
     bool down = false;
     bool stroking = false;
     int x0 = 0, y0 = 0, x1 = 0, y1 = 0;
-    int px = 0, py = 0;
-    int64_t down_us = 0, last_stroke_us = 0;
-    float path_x = 0.f, path_y = 0.f;
+    int64_t last_stroke_us = 0;
+    stroke_detector rub;
+    stroke_init(&rub);
     bool logged = false;
     for (;;) {
         uint8_t reg = CST816_REG_POINTS;
@@ -340,41 +341,33 @@ static void touch_task(void *arg)
                 if (!down) {
                     down = true;
                     stroking = false;
-                    path_x = 0.f;
-                    path_y = 0.f;
-                    down_us = now;
-                    x0 = px = x;
-                    y0 = py = y;
-                } else {
-                    float dx = (float)(x - px), dy = (float)(y - py);
-                    path_x += fabsf(dx);
-                    path_y += fabsf(dy);
+                    last_stroke_us = 0;
+                    x0 = x1 = x;
+                    y0 = y1 = y;
+                    stroke_down(&rub, x, y, now);
+                } else if (stroke_feed(&rub, x, y, now)) {
+                    /* A continued rub keeps happy alive. Do not rewrite the
+                     * timestamp on every 30 ms poll, and let happy fade if
+                     * the finger stops moving. */
+                    stroking = true;
+                    if (last_stroke_us == 0 ||
+                        now - last_stroke_us >= STROKE_REFRESH_US) {
+                        bool first = last_stroke_us == 0;
+                        last_stroke_us = now;
+                        s_stroke_x = (float)(x - 180) / 180.f;
+                        s_stroke_us = now;
+                        if (first) ESP_LOGI(TAG, "stroke (%d,%d)", x, y);
+                    }
                 }
                 x1 = x;
                 y1 = y;
-                px = x;
-                py = y;
                 if (!logged) {
                     logged = true;
                     ESP_LOGI(TAG, "touch works (%d,%d)%s", x, y, pts > 1 ? " multi" : "");
                 }
-                /* A deliberate rub starts happy mid-gesture and keeps it alive;
-                 * a quick horizontal flick still turns the page on release. */
-                /* Petting is a vertical rub; left/right belongs to page swipes. */
-                if (!stroking && path_y >= STROKE_MIN_PATH &&
-                    path_y > path_x * 1.2f && now - down_us >= STROKE_MIN_US) {
-                    stroking = true;
-                    last_stroke_us = now;
-                    s_stroke_x = (float)(x - 180) / 180.f;
-                    s_stroke_us = now;
-                    ESP_LOGI(TAG, "stroke (%d,%d)", x, y);
-                } else if (stroking && now - last_stroke_us > 250000LL) {
-                    last_stroke_us = now;
-                    s_stroke_x = (float)(x - 180) / 180.f;
-                    s_stroke_us = now;
-                }
             } else if (down) {
                 down = false;
+                stroke_up(&rub);
                 int dx = x1 - x0, dy = y1 - y0;
                 if (stroking) {
                     ESP_LOGI(TAG, "stroke end (%d,%d)", x1, y1);
@@ -1389,8 +1382,8 @@ void app_main(void)
         int base_ns = ns;
         bool urgent_base = (base_ns == PIP_APPROVAL || base_ns == PIP_MCQ);
 
-        /* Sensor reactions: a shake shows dizzy, a vertical screen stroke
-         * shows happy. An approval/question outranks both: it cancels a
+        /* Sensor reactions: six shakes show dizzy, six back-and-forth screen
+         * passes show happy. An approval/question outranks both: it cancels a
          * running reaction and ignores new shakes or strokes until DSH
          * answers it. */
         {

@@ -42,6 +42,8 @@ final class AppModel: ObservableObject {
     private var failedPolls = 0
     private var lastPortDiscovery = Date.distantPast
     private var discoveringPort = false
+    private let isSnapshotRun = CommandLine.arguments.contains("--snapshot")
+    private var forceOfflineForSnapshot = false
 
     init() {
         let defaults = UserDefaults.standard
@@ -208,6 +210,17 @@ final class AppModel: ObservableObject {
         animations.first(where: { $0.id == id })
     }
 
+    /// Only used by the offscreen snapshot mode so the offline screens can be
+    /// reviewed without touching the real settings.
+    func makeOfflineForSnapshot() {
+        forceOfflineForSnapshot = true
+        dshOnline = false
+        pluginState = nil
+        everConnected = true
+        dshURLString = "http://127.0.0.1:1"
+        startPolling()
+    }
+
     func pauseBackgroundWork() {
         pollTask?.cancel()
         pollTask = nil
@@ -283,6 +296,7 @@ final class AppModel: ObservableObject {
     /// origin at `~/.dsh/cue9/dsh.json`; use it only as a fallback when the
     /// saved address is local and stops answering.
     private func discoverDSHURL() async {
+        guard !forceOfflineForSnapshot else { return }
         let now = Date()
         guard !discoveringPort, now.timeIntervalSince(lastPortDiscovery) > 5 else { return }
         guard let current = URL(string: dshURLString), Self.isLoopback(current) else { return }
@@ -315,6 +329,13 @@ final class AppModel: ObservableObject {
     /// Point the local renderer at whatever DSH says is playing right now.
     func configureLivePreview(reset: Bool = true) {
         guard let animation = liveAnimation, CueCatalog.isRenderable(animation) else { return }
+        showPreview(animation: animation, reset: reset)
+    }
+
+    /// Point the local renderer at one named face. Used by the live page for
+    /// casual previews as well as by the studio.
+    func showPreview(animation: String, reset: Bool = true) {
+        guard CueCatalog.isRenderable(animation) else { return }
         preview.configure(
             state: CueCatalog.stateIndex(animation),
             ink: palette[animation] ?? CueCatalog.defaultColor(for: animation),
@@ -325,12 +346,13 @@ final class AppModel: ObservableObject {
 
     func configurePreview(reset: Bool = true) {
         guard !selectedAnimation.isEmpty else { return }
-        preview.configure(
-            state: CueCatalog.stateIndex(selectedAnimation),
-            ink: palette[selectedAnimation] ?? CueCatalog.defaultColor(for: selectedAnimation),
-            background: backgrounds[selectedAnimation] ?? CueCatalog.defaultBackground,
-            reset: reset
-        )
+        showPreview(animation: selectedAnimation, reset: reset)
+    }
+
+    /// The best face to show when nothing is arriving from DSH.
+    var idleFace: String {
+        if CueCatalog.isRenderable("idle") { return "idle" }
+        return animations.first(where: { !$0.deviceOnly })?.id ?? animations.first?.id ?? ""
     }
 
     func selectAction(_ action: String) {
@@ -383,11 +405,11 @@ final class AppModel: ObservableObject {
 
     func previewAction(_ action: String, animation: String) {
         guard dshOnline else {
-            testState = .failed("Connect the DSH plugin first.")
+            testState = .failed("Connect DeepSeek Harness first.")
             return
         }
         guard usbConnected else {
-            testState = .failed("The mote is not connected over USB.")
+            testState = .failed("cue9 isn't connected right now.")
             return
         }
         testState = .sending
@@ -399,7 +421,7 @@ final class AppModel: ObservableObject {
                 _ = try await client.preview(action: action, animation: animation)
                 await refresh()
                 guard dshOnline else {
-                    testState = .failed("Sent, but the plugin stopped responding.")
+                    testState = .failed("Sent, but DeepSeek stopped responding.")
                     return
                 }
                 testState = .sent
@@ -408,7 +430,7 @@ final class AppModel: ObservableObject {
                 pluginError = error.localizedDescription
                 dshOnline = false
                 isReconnecting = everConnected
-                testState = .failed("Could not reach the DSH plugin.")
+                testState = .failed("Could not reach DeepSeek Harness.")
             }
         }
     }
@@ -468,20 +490,13 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func actionUsing(_ animation: String) -> String? {
-        if mapping[selectedAction]?.contains(animation) == true {
-            return selectedAction
-        }
-        return actions.first(where: { mapping[$0.id]?.contains(animation) == true })?.id
-    }
-
     func isUnmapped(_ actionID: String) -> Bool {
         (mapping[actionID] ?? []).isEmpty
     }
 
     func resumeLive() {
         guard dshOnline else {
-            testState = .failed("Connect the DSH plugin first.")
+            testState = .failed("Connect DeepSeek Harness first.")
             return
         }
         testState = .sending
@@ -495,7 +510,7 @@ final class AppModel: ObservableObject {
                 pluginError = error.localizedDescription
                 dshOnline = false
                 isReconnecting = everConnected
-                testState = .failed("Could not reach the DSH plugin.")
+                testState = .failed("Could not reach DeepSeek Harness.")
             }
         }
     }
@@ -514,10 +529,6 @@ final class AppModel: ObservableObject {
 
     var mappedActionCount: Int {
         actions.filter { !isUnmapped($0.id) }.count
-    }
-
-    func usedByActions(for animation: String) -> [CueAction] {
-        actions.filter { mapping[$0.id]?.contains(animation) == true }
     }
 
     private func scheduleTestClear() {
@@ -586,7 +597,7 @@ final class AppModel: ObservableObject {
 
     func setLink(transport: String, host: String? = nil) async {
         if transport == "wifi", (host ?? bridgeHost).isEmpty {
-            linkError = "Set the Pi's SSH address first."
+            linkError = "Add the Raspberry Pi's address first."
             return
         }
         linkBusy = true
@@ -629,7 +640,7 @@ final class AppModel: ObservableObject {
     /// Requires the mote on USB and a Pi summary at ~/.dsh/cue9/pi.json.
     func provisionMote(ssid: String, psk: String) async -> Bool {
         guard let summary = MoteProvisioning.loadSummary() else {
-            linkError = "No Pi setup found at ~/.dsh/cue9/pi.json."
+            linkError = "The Raspberry Pi isn't set up yet. Close this and set it up in Connect."
             return false
         }
         guard let data = try? MoteProvisioning.configData(summary: summary, ssid: ssid, psk: psk) else {
@@ -683,20 +694,6 @@ final class AppModel: ObservableObject {
         pluginState = nil
         isReconnecting = false
         startPolling()
-    }
-
-    func usageCount(for animation: String) -> Int {
-        mapping.values.filter { $0.contains(animation) }.count
-    }
-
-    func mappingSummary(for action: String) -> String {
-        let mapped = mapping[action] ?? []
-        guard !mapped.isEmpty else { return "No animation" }
-        let labels = mapped.map { animationLabel($0) }
-        if labels.count <= 2 {
-            return labels.joined(separator: " + ")
-        }
-        return "\(mapped.count) animations"
     }
 
     // MARK: - Catalog
@@ -835,7 +832,9 @@ final class AppModel: ObservableObject {
                 withJSONObject: snapshot,
                 options: [.prettyPrinted, .sortedKeys]
             )
-            try data.write(to: CuePaths.mapping, options: .atomic)
+            if !isSnapshotRun {
+                try data.write(to: CuePaths.mapping, options: .atomic)
+            }
             if showBadge {
                 saveState = .savedLocally
                 scheduleSaveClear()
@@ -942,8 +941,10 @@ final class AppModel: ObservableObject {
             )
             Self.backupColourFile(CuePaths.palette, to: CuePaths.paletteBackup)
             Self.backupColourFile(CuePaths.backgrounds, to: CuePaths.backgroundsBackup)
-            try inkData.write(to: CuePaths.palette, options: .atomic)
-            try backgroundData.write(to: CuePaths.backgrounds, options: .atomic)
+            if !isSnapshotRun {
+                try inkData.write(to: CuePaths.palette, options: .atomic)
+                try backgroundData.write(to: CuePaths.backgrounds, options: .atomic)
+            }
             if showBadge {
                 saveState = .savedLocally
                 scheduleSaveClear()
@@ -1073,6 +1074,7 @@ final class AppModel: ObservableObject {
     }
 
     private func saveHistory() {
+        guard !isSnapshotRun else { return }
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]

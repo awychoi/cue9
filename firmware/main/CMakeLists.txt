@@ -5,6 +5,7 @@ idf_component_register(
          "../src/raster.c" "../src/font.c" "../src/font_baked.c" "../src/pip_scene.c"
          "../src/ambient.c"
          "../src/shake.c"
+         "../src/stroke.c"
     INCLUDE_DIRS "." "../src"
     REQUIRES esp_lcd esp_timer driver esp_driver_i2c esp_wifi esp_netif esp-tls mbedtls json nvs_flash
 )

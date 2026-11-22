@@ -160,8 +160,8 @@ struct CopySourceRow: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .help("Copy the plugin URL")
-        .accessibilityLabel("Copy plugin URL")
+        .help("Copy the plugin link")
+        .accessibilityLabel("Copy plugin link")
     }
 
     private func copy() {
@@ -211,5 +211,126 @@ struct MakerCredit: View {
             .help("wychoi.com")
         }
         .padding(.horizontal, 4)
+    }
+}
+
+struct SaveStatusView: View {
+    let state: SaveState
+
+    private var icon: String {
+        switch state {
+        case .sent: return "checkmark.circle.fill"
+        case .savedLocally: return "checkmark"
+        case .pending: return "arrow.triangle.2.circlepath"
+        case .failed: return "exclamationmark.triangle"
+        case .idle: return ""
+        }
+    }
+
+    private var color: Color {
+        switch state {
+        case .sent: return Cue9Theme.success
+        case .pending: return Cue9Theme.warning
+        case .failed: return Cue9Theme.danger
+        default: return Cue9Theme.muted
+        }
+    }
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Image(systemName: icon)
+                .font(.system(size: 10, weight: .semibold))
+            Text(state.text)
+                .font(Cue9Font.font(10.5))
+                .lineLimit(1)
+        }
+        .foregroundStyle(color)
+        .help(state.text)
+    }
+}
+
+struct TestFeedbackView: View {
+    let state: TestState
+
+    var body: some View {
+        switch state {
+        case .idle:
+            EmptyView()
+        case .sending:
+            HStack(spacing: 6) {
+                ProgressView().controlSize(.mini)
+                Text(state.text)
+                    .font(Cue9Font.font(10.5))
+                    .foregroundStyle(Cue9Theme.muted)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        case .sent:
+            HStack(spacing: 5) {
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.system(size: 10, weight: .semibold))
+                Text(state.text)
+            }
+            .font(Cue9Font.font(10.5, .medium))
+            .foregroundStyle(Cue9Theme.success)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        case .failed(let message):
+            HStack(alignment: .top, spacing: 5) {
+                Image(systemName: "exclamationmark.triangle")
+                    .font(.system(size: 10, weight: .semibold))
+                    .padding(.top, 1)
+                Text(message)
+                    .font(Cue9Font.font(10.5))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .foregroundStyle(Cue9Theme.danger)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+}
+
+struct ColourWell: View {
+    let title: String
+    let color: Color
+    let hex: String
+    let selected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(color)
+                    .frame(width: 24, height: 24)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .stroke(Color.black.opacity(0.12), lineWidth: 1)
+                    )
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(title)
+                        .font(Cue9Font.font(10.5, .medium))
+                        .foregroundStyle(Cue9Theme.ink2)
+                    Text("#\(hex)")
+                        .font(.system(size: 9, design: .monospaced))
+                        .foregroundStyle(Cue9Theme.soft)
+                }
+                Spacer(minLength: 0)
+                Image(systemName: "paintbrush")
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundStyle(Cue9Theme.soft)
+            }
+            .padding(.horizontal, 8)
+            .frame(maxWidth: .infinity, minHeight: 38, alignment: .leading)
+            .background(
+                selected ? Cue9Theme.surface : Cue9Theme.paper,
+                in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(selected ? Cue9Theme.orange.opacity(0.7) : Cue9Theme.line, lineWidth: 1)
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("\(title) colour, #\(hex)")
     }
 }

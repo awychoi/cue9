@@ -64,7 +64,7 @@ struct MoteColourPanel: View {
 
             hexSection
 
-            Text("Colours apply the next time this animation runs.")
+            Text("Colours apply the next time this face plays.")
                 .font(Cue9Font.font(10.5))
                 .foregroundStyle(Cue9Theme.muted)
                 .fixedSize(horizontal: false, vertical: true)

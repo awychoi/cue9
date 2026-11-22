@@ -32,7 +32,7 @@ final class PreviewEngine: ObservableObject {
     private var motionObserver: NSObjectProtocol?
 
     init() {
-        context = cue9_preview_create(1)
+        context = RendererGate.run { cue9_preview_create(1) }
         pixels = .allocate(capacity: 360 * 360)
         pixels?.initialize(repeating: 0, count: 360 * 360)
         motionObserver = NotificationCenter.default.addObserver(
@@ -55,7 +55,7 @@ final class PreviewEngine: ObservableObject {
             NotificationCenter.default.removeObserver(motionObserver)
         }
         pixels?.deallocate()
-        cue9_preview_destroy(context)
+        RendererGate.run { cue9_preview_destroy(context) }
     }
 
     func start() {
@@ -84,7 +84,7 @@ final class PreviewEngine: ObservableObject {
             self.background = background
             self.sequenceSeconds = Self.duration(for: state)
             if reset {
-                cue9_preview_reset(self.context)
+                RendererGate.run { cue9_preview_reset(self.context) }
                 self.time = self.reduceMotion ? 0.9 : 0
             }
             self.needsFrame = true
@@ -115,19 +115,21 @@ final class PreviewEngine: ObservableObject {
          * (the three typing takes 5 s, everything else 6 s). The preview has to
          * do the same or the blink phase keeps accumulating and flickers. */
         if sequenceSeconds > 0 && time >= sequenceSeconds {
-            cue9_preview_reset(context)
+            RendererGate.run { cue9_preview_reset(context) }
             time = 0
         }
         let dt: Float = 1.0 / 30.0
         var inkValue = cue9_rgb(r: ink.r, g: ink.g, b: ink.b)
         var backgroundValue = cue9_rgb(r: background.r, g: background.g, b: background.b)
-        let rc: Int32 = withUnsafePointer(to: &inkValue) { inkPointer in
-            withUnsafePointer(to: &backgroundValue) { backgroundPointer in
-                cue9_preview_render(
-                    context, Int32(state), time, dt,
-                    inkPointer, backgroundPointer,
-                    pixels, Int32(360 * 360)
-                )
+        let rc: Int32 = RendererGate.run {
+            withUnsafePointer(to: &inkValue) { inkPointer in
+                withUnsafePointer(to: &backgroundValue) { backgroundPointer in
+                    cue9_preview_render(
+                        context, Int32(state), time, dt,
+                        inkPointer, backgroundPointer,
+                        pixels, Int32(360 * 360)
+                    )
+                }
             }
         }
         guard rc == 0 else { return }

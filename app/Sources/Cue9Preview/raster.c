@@ -17,6 +17,7 @@
  * A device build slices the glow mask per band; see notes/core-report.md.
  */
 #include "raster.h"
+#include "font_baked.h"
 
 #include <math.h>
 #include <stddef.h>
@@ -735,6 +736,7 @@ static uint32_t utf8_next(const unsigned char **pp) {
 
 static uint16_t text_gid(uint32_t cp) {
   if (cp == 0x2026u) return 0x2026u;
+  if (cp == 0x00B0u || cp == 0x00B7u) return (uint16_t)cp;
   if (cp == (uint32_t)'\t' || cp == (uint32_t)'\n' || cp == (uint32_t)'\r')
     cp = (uint32_t)' ';
   if (cp < 32u || cp > 126u) cp = (uint32_t)'?';
@@ -765,7 +767,7 @@ float r_text_width(const r_dl *dl, int font, const char *utf8) {
   uint16_t cps[R_MAX_GLYPHS];
   const unsigned char *p;
   (void)dl;
-  if (!utf8 || font < 0 || font > 3) return 0.0f;
+  if (!utf8 || font < 0 || font >= R_FONT_NFACE) return 0.0f;
   p = (const unsigned char *)utf8;
   while (*p) {
     uint32_t cp = utf8_next(&p);
@@ -787,7 +789,7 @@ static int text_common(r_dl *dl, int font, const char *utf8, float x, float y,
   const unsigned char *p;
   r_rgb color;
   uint8_t alpha;
-  if (!dl || !utf8 || font < 0 || font > 3 || align < 0 || align > 2)
+  if (!dl || !utf8 || font < 0 || font >= R_FONT_NFACE || align < 0 || align > 2)
     return R_ERR_PARAM;
   if (!isfinite(x) || !isfinite(y) || !isfinite(maxw)) return R_ERR_PARAM;
   p = (const unsigned char *)utf8;

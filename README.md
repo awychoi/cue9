@@ -5,11 +5,11 @@
 
 **A quiet control surface for a DSH-powered desk companion.** Currently supports the ESP32-S3 VoCat / EchoEar.
 
-cue9 shows what DeepSeek Harness is doing on the companion’s round screen and lets you choose the face for each action. When the work goes quiet it keeps the time, and a swipe brings the weather.
+cue9 shows what DeepSeek Harness is doing on the companion’s round screen and lets you choose the face for each moment. When the work goes quiet it keeps the time, and a swipe brings the weather.
 
-![The cue9 mote view, following DSH](docs/cue9-mote.png)
+![The cue9 Now page, following DeepSeek Harness](docs/cue9-mote.png)
 
-*Companion view, following DSH.*
+*The Now page, following DeepSeek Harness.*
 
 ![The cue9 demo on a real device: working, sleep, approval, question, and done](docs/cue9-demo.webp)
 
@@ -17,9 +17,11 @@ cue9 shows what DeepSeek Harness is doing on the companion’s round screen and 
 
 ## What it does
 
-- **Mote** — the live face, the current cue, and a short local history. **Edit** maps actions to animations, sets expression and background colours, and tests a face on the mote.
-- **Clock and weather** — the mote’s other two pages, fed by the Pi. Set the timezone, city, units, and clock format under **Device → Ambient**.
-- **Device** — DSH plugin setup, the USB or Wi-Fi link, firmware flashing, and advanced settings.
+- **Now** — the live face, what DeepSeek is doing, and a short local history. Try a face without changing anything.
+- **Faces** — choose which faces each moment can use, paint them, and show one on cue9.
+- **Clock & Weather** — the companion’s two pages, previewed as they appear on the device. Set the city, timezone, units, and clock format.
+- **Connect** — the DeepSeek add-on, the USB or Wi-Fi link, and keeping this Mac awake.
+- **Device** — shake and stroke reactions, a software reinstall, and advanced settings.
 
 ## Run it
 
@@ -33,17 +35,18 @@ You need macOS 14 or newer, the Xcode command line tools, and DeepSeek Harness.
    open app/build/cue9.app
    ```
 
-3. cue9 finds DSH’s current local port automatically. If the plugin is not detected, open **Device**. If DSH runs elsewhere, set the address under **Advanced**.
+3. cue9 finds DSH’s current local port automatically. If the plugin is not detected, open **Connect**. If DSH runs elsewhere, set the address under **Device → Advanced**.
 
-Flashing firmware (needs `esptool`) and the wireless Pi link are optional; both live under **Device**.
+Flashing the companion’s software (needs `esptool`) lives under **Device**; the wireless Pi link is under **Connect**.
 
 The app stores the mapping, colours, and recent history in `~/.dsh/cue9/`. Delete `mapping.json`, the two colour files, and their `.backup.json` copies to reset the app to its defaults.
 
 ## Troubleshooting
 
 - **Plugin not connected** — DSH may be closed, the plugin may not be installed, or the address may be wrong. The app cannot install the plugin for you.
-- **USB found but the plugin is offline** — the app can see the mote and flash firmware, but the Mote page stays offline until the plugin connects.
-- **No USB port listed** — check the cable, refresh the port menu, and make sure nothing else holds the port.
+- **USB found but the plugin is offline** — the app can see cue9 and flash its software, but the Now page stays on the offline face until the add-on connects.
+- **No USB port listed** — check the cable, refresh the port menu in **Device**, and make sure nothing else holds the port.
+- **Clock or weather is wrong** — check the bridge is online, then open **Clock & Weather** to save the city and timezone again.
 - **Build fails** — confirm macOS 14+, that `swift --version` works, and that the script runs from the repository root.
 
 ## Technical

@@ -201,9 +201,9 @@ enum SaveState: Equatable {
         switch self {
         case .idle: return ""
         case .savedLocally: return "Saved on this Mac"
-        case .sent: return "Sent to DSH"
-        case .pending: return "Saved · sync pending"
-        case .failed: return "Save failed"
+        case .sent: return "Saved"
+        case .pending: return "Saved · will sync when DeepSeek returns"
+        case .failed: return "Couldn't save"
         }
     }
 
@@ -222,8 +222,8 @@ enum TestState: Equatable {
     var text: String {
         switch self {
         case .idle: return ""
-        case .sending: return "Sending to mote…"
-        case .sent: return "Shown on mote"
+        case .sending: return "Sending to cue9…"
+        case .sent: return "Playing on cue9"
         case .failed(let message): return message
         }
     }

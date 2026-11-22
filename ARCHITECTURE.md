@@ -8,21 +8,24 @@ cue9 is a native macOS app in SwiftUI. It mirrors and drives a local DSH plugin:
 DSH plugin (dsh-cue9-mote)
   ↕  local HTTP  ·  127.0.0.1:<dsh port>  ·  /plugins/cue9/*
 AppModel
-  ├─ MoteView          live face, recent cues, mapping/colour editor
-  ├─ DeviceView        setup, firmware, link, ambient, advanced
+  ├─ NowView           live face, recent cues, local face previews
+  ├─ FacesView         moment → face mapping and colours
+  ├─ ClockWeatherView  timezone, city, units + device page previews
+  ├─ ConnectView       DSH add-on, USB/Wi-Fi link, keep awake
+  ├─ DeviceView        reactions, software, advanced
   ├─ PreviewEngine     → Cue9Preview (C, 360×360)
   ├─ FirmwareFlasher   → esptool / USB
   └─ ~/.dsh/cue9/{mapping,colours,colour-backgrounds,history,catalog}.json
 ```
 
-The app has two destinations: **Mote** and **Device**. Mote also holds the editor behind **Edit**. If the plugin cannot be reached, Device becomes the install guide; when it can, Device shows the plugin, firmware, link, ambient, and advanced sections.
+The app has five destinations. **Now**, **Faces**, and **Clock & Weather** are the everyday pages; **Connect** and **Device** hold setup. When the plugin cannot be reached, Connect becomes the install guide and Now shows its offline face.
 
 ## Source map
 
 | Path | Role |
 |---|---|
 | `app/Sources/Cue9App/` | SwiftUI app, state, DSH client, flasher, snapshots |
-| `app/Sources/Cue9Preview/` | C face renderer used by the app preview |
+| `app/Sources/Cue9Preview/` | C face and clock/weather renderer used by the app previews |
 | `firmware/` | ESP32-S3 firmware: panel, pages, shake, config |
 | `pi/` | Raspberry Pi bridge (`cue9-moted`, `cue9-attach`) |
 | `brand/decided/final/` | Lockups, icon, wordmark |
@@ -50,9 +53,9 @@ The plugin’s `actions` and `animations` lists drive the editor. The app caches
 
 - **Live state** — sleep starts after five minutes without work; approvals and questions stay above it. A new session gets one wake beat. If the heartbeat stops, the mote falls back to its `hub` face.
 - **History** — the last six cues are recorded locally in `history.json`; they are not fetched from DSH.
-- **Preview** — the Mote screen follows DSH, while the editor selects an animation locally. “Test on mote” sends that exact animation ID to the device.
+- **Preview** — the Now page follows DSH, while Faces selects an animation locally. “Show on cue9” sends that exact animation ID to the device.
 - **Pages** — the mote holds three pages: face, clock, weather. Swipe or send `PAGE <0|1|2>`. An approval or question temporarily takes the screen; the page underneath is restored afterwards.
-- **Clock and weather** — the Pi sends `TIME` every 15 s and `WX` every 15 minutes. Timezone, city, units, and 12/24-hour format are set under **Device → Ambient**.
+- **Clock and weather** — the Pi sends `TIME` every 15 s and `WX` every 15 minutes. Timezone, city, units, and 12/24-hour format are set under **Clock & Weather** in the app.
 
 ## Wireless path
 
@@ -62,7 +65,7 @@ The mote keeps its Wi-Fi credentials and TLS material in the `cue9cfg` partition
 
 ## Rendering and firmware
 
-The preview is a small C renderer producing a 360×360 frame at 30 fps, with the expression and background colours passed in. The firmware keeps the same drawing code for the device.
+The face preview is a small C renderer producing a 360×360 frame at 30 fps. The clock and weather previews use the same `ambient.c` pages as the firmware, so the app shows the real device layout. The firmware keeps the same drawing code for the device.
 
 `firmware.bin` is a merged image (bootloader, partition table, app). Before flashing, the app releases the USB bridge; it then runs `esptool` at `0x0` and reconnects the bridge. Colours and behaviour settings are sent at runtime, so they never require a rebuild.
 
