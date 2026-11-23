@@ -1,30 +1,33 @@
 # cue9 architecture
 
-cue9 is a native SwiftUI app that mirrors and drives a local DSH plugin: it polls the plugin,
-draws the companion’s face, edits the action-to-animation mapping, and flashes firmware. There
-is no server, account, or cloud.
+cue9 is a native SwiftUI app that mirrors and drives two local DSH plugins: one for the desk
+companion, one for approvals on an iPhone. There is no hosted backend; the phone link is a local
+listener, with Tailscale Serve for access off the LAN.
 
 ```
-DSH plugin (dsh-cue9-mote)
-  ↕ local HTTP · 127.0.0.1:<port> · /plugins/cue9/*
+DSH plugins (local HTTP)
+  ├─ dsh-cue9-mote   USB or Pi → mote
+  └─ dsh-cue9-phone  HTTPS → iPhone (LAN or Tailscale)
 AppModel
   ├─ Now, Faces, Clock & Weather   everyday pages
-  ├─ Connect, Device               setup, USB/Wi-Fi, firmware
+  ├─ Connect, Device               setup, USB/Wi-Fi, firmware, phone
   ├─ PreviewEngine → Cue9Preview (C, 360×360)
   └─ ~/.dsh/cue9/*.json
 ```
 
 | Path | Role |
 |---|---|
-| `app/Sources/Cue9App/` | SwiftUI app, state, DSH client, flasher, snapshots |
+| `app/Sources/Cue9App/` | SwiftUI app, state, DSH client, phone setup, flasher |
 | `app/Sources/Cue9Preview/` | C face, clock, and weather renderer for previews |
 | `firmware/` | ESP32-S3 firmware: panel, pages, shake, config |
 | `pi/` | Raspberry Pi bridge (`cue9-moted`, `cue9-attach`) |
+| `phone/` | DSH phone plugin, iPhone web app, pairing, push |
 | `brand/decided/final/` | Lockups, icon, wordmark |
 
-## DSH plugin
+## DSH plugins
 
-The plugin lives in [awychoi/dsh-cue9-mote](https://github.com/awychoi/dsh-cue9-mote).
+The mote plugin lives in [awychoi/dsh-cue9-mote](https://github.com/awychoi/dsh-cue9-mote); the
+phone plugin lives in `phone/`.
 
 | Call | Purpose |
 |---|---|
@@ -44,10 +47,29 @@ records its origin in `~/.dsh/cue9/dsh.json`, and the app follows it.
 `actions` and `animations` drive the editor; the app caches them in `catalog.json` and reconciles
 changes on load. Shake and stroke can be previewed and coloured but not mapped.
 
+### Phone plugin
+
+| Call | Purpose |
+|---|---|
+| `GET /plugins/cue9-phone/pending` | Pending requests for the DSH panel |
+| `POST /plugins/cue9-phone/answer` | Answer from the DSH panel |
+| `/plugins/cue9-phone/setup/*` | Status, pairing, apply, reset, revoke |
+| `POST /plugins/cue9-phone/app/register` | Authorize this Mac’s app |
+| `POST /plugins/cue9-phone/power` | Keep the Mac awake |
+
+The plugin serves the phone app on loopback; its `/api/*` routes handle pairing, pending requests,
+answers, and push. `tailscale serve` publishes it on port 8443 to the tailnet; an optional LAN
+HTTPS listener uses the same certificate for the home-Wi-Fi fallback. Pairing is a one-time QR;
+sessions, push keys, and subscriptions live under `~/.dsh/cue9/phone/`. Panel routes use DSH’s
+own admission; Mac-only routes use the app’s Keychain token, stored as a hash; the phone uses a
+paired session cookie. There is no public ingress.
+
 ## Behaviour
 
 - **Priority** — approvals and questions outrank everything. Sleep starts after five minutes
   without work; a new session gets one wake beat; a lost heartbeat falls back to `hub`.
+- **Answers** — each approval and question appears in DSH, on the laptop panel, and on the phone.
+  The first answer wins; answering in cue9 cancels DSH’s card, so there is no hand-off step.
 - **Pages** — face, clock, weather. Swipe or send `PAGE <0|1|2>`. Attention takes the screen
   temporarily, then restores the page underneath.
 - **Clock and weather** — the Pi sends `TIME` every 15 s and `WX` every 15 minutes. The app sets
@@ -71,4 +93,5 @@ behaviour are sent at runtime, so they never need a rebuild.
 ## Build
 
 `./app/Scripts/build-app.sh` builds with SwiftPM on macOS 14+, bundles resources, renders the
-icon, ad-hoc signs, and writes `app/build/cue9.app`. See [README.md](README.md) for the overview.
+icon, ad-hoc signs, and writes `app/build/cue9.app`. The phone plugin is plain JavaScript loaded
+by DSH, so it has no build step. See [README.md](README.md) for the overview.

@@ -4,19 +4,17 @@ order: 40
 kicker: Hardware · ESP32 · DSH
 banner: docs/cue9-demo.jpg
 banner_video: docs/cue9-demo.mp4
-banner_alt: cue9 desk mote showing the frantic typing animation on its round screen.
+banner_alt: cue9 on a desk, cycling through its working, sleep, approval, question, and done faces on a round screen.
 logo: brand/decided/final/cue9-lockup-white.svg
 logo_light: brand/decided/final/cue9-lockup.svg
 ---
 
 ## How it started
 
-Instead of babysitting my coding agents during long sessions, I repurposed a spare ESP32 to nudge me whenever one actually needs my attention.
+Long coding sessions meant either constantly tabbing back to check progress or realizing hours later that an agent had been stalled on an approval. So I built cue9 so it budges me only when it needs me but I can still keep an eye on it if I want.
 
 ## What it is
 
-cue9 is an ecosystem of bespoke apps, plugins, and hardware devices that lets DSH and users interact beyond the laptop it runs on.
+cue9 pairs a DSH plugin, a Mac app, an ESP32 desk companion, and an iPhone approval pipeline so you can focus on other work while your agents run.
 
-It starts with a desk companion. You work on something else while DSH works, and the companion shows what it's stuck on, right in your peripheral vision. When nothing needs you it becomes a clock, and the weather for your place is one swipe away.
-
-A small Mac app holds the rest: DSH plugin setup, the USB or Wi-Fi link, the timezone and city for the pages, and firmware flashing.
+Status cues travel over SSH through a Raspberry Pi to drive the companion's animations, while native Apple push notifications route remote approvals to a home-screen web app over Tailscale / LAN. Acting on either clears the other automatically.
