@@ -59,21 +59,21 @@ struct DeviceView: View {
                 ZStack {
                     RoundedRectangle(cornerRadius: 18, style: .continuous)
                         .fill(Cue9Theme.stage)
-                        .frame(width: 128, height: 128)
+                        .frame(width: 112, height: 112)
                     if let shell = Cue9Assets.image("cat-shell-white") {
                         Image(nsImage: shell)
                             .resizable()
                             .scaledToFit()
-                            .frame(width: 100, height: 120)
+                            .frame(width: 88, height: 104)
                     } else {
                         Image(systemName: "pawprint.fill")
-                            .font(.system(size: 42, weight: .light))
+                            .font(.system(size: 36, weight: .light))
                             .foregroundStyle(Cue9Theme.orange)
                     }
                     Circle()
                         .fill(model.moteConnected ? Cue9Theme.success : Cue9Theme.warning)
                         .frame(width: 9, height: 9)
-                        .offset(x: 50, y: -50)
+                        .offset(x: 44, y: -44)
                 }
 
                 VStack(alignment: .leading, spacing: 5) {
@@ -152,17 +152,16 @@ struct DeviceView: View {
     private var reactionsCard: some View {
         Card {
             VStack(alignment: .leading, spacing: 0) {
-                HStack(alignment: .top, spacing: 20) {
-                    VStack(alignment: .leading, spacing: 5) {
+                HStack(alignment: .top, spacing: 16) {
+                    VStack(alignment: .leading, spacing: 4) {
                         Text("Reactions")
                             .font(Cue9Font.font(15.5, .semibold))
                             .foregroundStyle(Cue9Theme.ink)
                         Text("Shake and touch reactions.")
-                            .font(Cue9Font.font(12))
+                            .font(Cue9Font.font(11.5))
                             .foregroundStyle(Cue9Theme.muted)
-                            .fixedSize(horizontal: false, vertical: true)
                     }
-                    Spacer(minLength: 16)
+                    Spacer(minLength: 12)
                     if model.deviceAnimations.count >= 2 {
                         HStack(spacing: 7) {
                             ForEach(model.deviceAnimations) { animation in
@@ -184,38 +183,71 @@ struct DeviceView: View {
 
                 Divider()
                     .overlay(Cue9Theme.line)
-                    .padding(.top, 15)
+                    .padding(.top, 10)
 
-                behaviourSlider(
-                    title: "Shake sensitivity",
-                    help: "How easily a shake makes cue9 dizzy.",
-                    scaleHint: "1 is least sensitive. 5 is most.",
-                    value: sensitivityBinding,
-                    range: 1...5,
-                    step: 1,
-                    readout: "\(model.shakeSensitivity) / 5",
-                    onCommit: { model.updateBehaviour(sensitivity: model.shakeSensitivity) }
-                )
+                ViewThatFits(in: .horizontal) {
+                    HStack(alignment: .top, spacing: 18) {
+                        behaviourSlider(
+                            title: "Shake sensitivity",
+                            help: "How easily a shake makes cue9 dizzy. 1 is least sensitive. 5 is most.",
+                            value: sensitivityBinding,
+                            range: 1...5,
+                            step: 1,
+                            readout: "\(model.shakeSensitivity) / 5",
+                            onCommit: { model.updateBehaviour(sensitivity: model.shakeSensitivity) }
+                        )
+                        behaviourSlider(
+                            title: "Dizzy reaction",
+                            help: "How long the dizzy face stays after a shake.",
+                            value: dizzyBinding,
+                            range: 2...10,
+                            step: 0.5,
+                            readout: String(format: "%.1f s", model.dizzySeconds),
+                            onCommit: { model.updateBehaviour(dizzySeconds: model.dizzySeconds) }
+                        )
+                        behaviourSlider(
+                            title: "Happy reaction",
+                            help: "How long the happy face stays after a stroke.",
+                            value: happyBinding,
+                            range: 1...4,
+                            step: 0.1,
+                            readout: String(format: "%.1f s", model.happySeconds),
+                            onCommit: { model.updateBehaviour(happySeconds: model.happySeconds) }
+                        )
+                    }
+                    .frame(minWidth: 700)
 
-                behaviourSlider(
-                    title: "Dizzy reaction",
-                    help: "How long the dizzy face stays after a shake.",
-                    value: dizzyBinding,
-                    range: 2...10,
-                    step: 0.5,
-                    readout: String(format: "%.1f s", model.dizzySeconds),
-                    onCommit: { model.updateBehaviour(dizzySeconds: model.dizzySeconds) }
-                )
-
-                behaviourSlider(
-                    title: "Happy reaction",
-                    help: "How long the happy face stays after a stroke.",
-                    value: happyBinding,
-                    range: 1...4,
-                    step: 0.1,
-                    readout: String(format: "%.1f s", model.happySeconds),
-                    onCommit: { model.updateBehaviour(happySeconds: model.happySeconds) }
-                )
+                    VStack(spacing: 10) {
+                        behaviourSlider(
+                            title: "Shake sensitivity",
+                            help: "How easily a shake makes cue9 dizzy. 1 is least sensitive. 5 is most.",
+                            value: sensitivityBinding,
+                            range: 1...5,
+                            step: 1,
+                            readout: "\(model.shakeSensitivity) / 5",
+                            onCommit: { model.updateBehaviour(sensitivity: model.shakeSensitivity) }
+                        )
+                        behaviourSlider(
+                            title: "Dizzy reaction",
+                            help: "How long the dizzy face stays after a shake.",
+                            value: dizzyBinding,
+                            range: 2...10,
+                            step: 0.5,
+                            readout: String(format: "%.1f s", model.dizzySeconds),
+                            onCommit: { model.updateBehaviour(dizzySeconds: model.dizzySeconds) }
+                        )
+                        behaviourSlider(
+                            title: "Happy reaction",
+                            help: "How long the happy face stays after a stroke.",
+                            value: happyBinding,
+                            range: 1...4,
+                            step: 0.1,
+                            readout: String(format: "%.1f s", model.happySeconds),
+                            onCommit: { model.updateBehaviour(happySeconds: model.happySeconds) }
+                        )
+                    }
+                }
+                .padding(.top, 10)
 
                 HStack(spacing: 5) {
                     Image(systemName: model.dshOnline ? "checkmark.circle" : "exclamationmark.circle")
@@ -226,7 +258,7 @@ struct DeviceView: View {
                         .font(Cue9Font.font(10.5))
                 }
                 .foregroundStyle(model.dshOnline ? Cue9Theme.soft : Cue9Theme.warning)
-                .padding(.top, 13)
+                .padding(.top, 8)
             }
             .disabled(!model.dshOnline)
             .opacity(model.dshOnline ? 1 : 0.55)
@@ -240,25 +272,25 @@ struct DeviceView: View {
     private func behaviourSlider(
         title: String,
         help: String,
-        scaleHint: String? = nil,
         value: Binding<Double>,
         range: ClosedRange<Double>,
         step: Double,
         readout: String,
         onCommit: @escaping () -> Void
     ) -> some View {
-        VStack(alignment: .leading, spacing: 3) {
-            HStack(spacing: 6) {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 5) {
                 Text(title)
-                    .font(Cue9Font.font(12, .medium))
+                    .font(Cue9Font.font(11.5, .medium))
                     .foregroundStyle(Cue9Theme.ink2)
+                    .lineLimit(1)
                 Image(systemName: "info.circle")
                     .font(.system(size: 9.5, weight: .medium))
                     .foregroundStyle(Cue9Theme.soft)
                     .help(help)
-                Spacer(minLength: 8)
+                Spacer(minLength: 4)
                 Text(readout)
-                    .font(.system(size: 10.5, weight: .medium, design: .monospaced))
+                    .font(.system(size: 10, weight: .medium, design: .monospaced))
                     .foregroundStyle(Cue9Theme.muted)
             }
             Slider(value: value, in: range, step: step) { editing in
@@ -266,13 +298,8 @@ struct DeviceView: View {
             }
             .tint(Cue9Theme.orange)
             .help(help)
-            if let scaleHint {
-                Text(scaleHint)
-                    .font(.system(size: 9.5))
-                    .foregroundStyle(Cue9Theme.soft)
-            }
         }
-        .padding(.top, 13)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     // MARK: - Software

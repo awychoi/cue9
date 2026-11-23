@@ -4,7 +4,7 @@
 
 #define STROKE_MIN_LEG 70.f             /* px net travel per one-way pass */
 #define STROKE_MAX_GAP_US 300000LL      /* a longer pause starts over */
-#define STROKE_SEQUENCE_US 6000000LL    /* six passes must land this fast */
+#define STROKE_SEQUENCE_US 6000000LL    /* passes must land this fast */
 #define STROKE_REVERSE_DOT (-0.5f)      /* >= ~120 degrees from the last pass */
 #define STROKE_DEADBAND 1.5f            /* ignore stationary jitter */
 #define STROKE_RECENT_US 400000LL
@@ -93,7 +93,7 @@ bool stroke_feed(stroke_detector *s, int x, int y, int64_t now_us)
     s->last_move_us = now_us;
     push_recent(s, dist, now_us);
 
-    /* Already three passes in: any continued movement keeps the rub alive. */
+    /* Already triggered: any continued movement keeps the rub alive. */
     if (s->triggered) return true;
 
     if (s->legs > 0 && now_us - s->first_leg_us > STROKE_SEQUENCE_US) {
@@ -101,7 +101,7 @@ bool stroke_feed(stroke_detector *s, int x, int y, int64_t now_us)
         return false;
     }
 
-    /* Three passes are counted but the finger is still too slow: hold the
+    /* The passes are counted but the finger is still too slow: hold the
      * count and trigger as soon as it speeds up. */
     if (s->legs >= STROKE_PASSES &&
         recent_path(s, now_us) >= STROKE_MIN_RECENT_PATH) {

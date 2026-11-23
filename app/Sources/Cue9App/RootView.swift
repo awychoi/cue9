@@ -77,7 +77,11 @@ struct RootView: View {
     var body: some View {
         // Keep the same view shape when the appearance changes so page state
         // and scroll positions survive the switch.
-        content.preferredColorScheme(appearance.colorScheme)
+        content
+            .preferredColorScheme(appearance.colorScheme)
+            .sheet(isPresented: $model.keychainExplainerVisible) {
+                KeychainExplainerSheet(model: model, isPresented: $model.keychainExplainerVisible)
+            }
     }
 
     private var content: some View {
@@ -101,6 +105,14 @@ struct RootView: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            // The window uses .fullSizeContentView with a transparent titlebar.
+            // This opaque band clips page content below the traffic lights while
+            // leaving the sidebar untouched and the window drag region usable.
+            .overlay(alignment: .top) {
+                Cue9Theme.paper
+                    .frame(height: 30)
+                    .allowsHitTesting(false)
+            }
         }
         .font(Cue9Font.font(13))
         .tint(Cue9Theme.orange)

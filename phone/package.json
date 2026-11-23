@@ -1,0 +1,55 @@
+{
+  "name": "dsh-cue9-phone",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "cue9 phone approvals: a DSH plugin, laptop panel and iPhone web app for approvals and questions.",
+  "author": "awychoi",
+  "license": "GPL-3.0",
+  "keywords": [
+    "deepseek",
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "cue9",
+    "approval",
+    "questions",
+    "iphone"
+  ],
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./icon": "./icon.svg",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "lib",
+    "public",
+    "icon.svg",
+    "setup.mjs",
+    "test"
+  ],
+  "scripts": {
+    "check": "node --check index.js && node --check client.js && node --check public/app.js && node --check public/sw.js && node --check setup.mjs && node --check lib/power.js && node --check lib/setup.js && node --check lib/audit.js && node --check lib/mote-attention.js && node --check lib/panel-auth.js && node --check lib/app-auth.js && node --check lib/sessions.js && node --check lib/push.js && node --test test/*.test.js",
+    "setup": "node setup.mjs"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": []
+    }
+  },
+  "dependencies": {
+    "web-push": "^3.6.7"
+  }
+}

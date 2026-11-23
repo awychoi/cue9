@@ -24,7 +24,15 @@ enum Snapshot {
             }
         }
 
-        let view = RootView(model: model, initialSection: section)
+        let root: AnyView
+        if CommandLine.arguments.contains("--snapshot-keychain") {
+            root = AnyView(KeychainExplainerSheet(model: model, isPresented: .constant(true)))
+        } else if CommandLine.arguments.contains("--snapshot-phone") {
+            root = AnyView(PhoneSetupSheet(model: model))
+        } else {
+            root = AnyView(RootView(model: model, initialSection: section))
+        }
+        let view = root
             .frame(width: width, height: height)
         let hosting = NSHostingView(rootView: view)
         hosting.frame = NSRect(x: 0, y: 0, width: width, height: height)

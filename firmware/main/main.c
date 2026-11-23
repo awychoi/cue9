@@ -148,15 +148,14 @@ static shake_detector s_shake;
 static volatile int64_t s_dizzy_us = DIZZY_DEFAULT_US;
 static volatile int64_t s_happy_us = HAPPY_DEFAULT_US;
 
-/* Three alternating back-and-forth passes post a happy timestamp. One swipe
- * or one return pass is not enough, so a page flick cannot trigger it. Any
- * start point and stroke direction work; thresholds live in stroke.c. */
 static volatile int64_t s_stroke_us;
 static volatile float s_stroke_x;
 #define STROKE_REFRESH_US 250000LL
 
 #define CST816_ADDR 0x15
 #define CST816_REG_POINTS 0x02
+#define CST816_REG_CHIP_ID 0xA7
+#define CST816_REG_DIS_AUTOSLEEP 0xFE
 static volatile int s_touch_nav;   /* +1 next page, -1 previous, 0 none */
 
 #define BQ27220_ADDR 0x55
@@ -241,7 +240,7 @@ static void gauge_task(void *arg)
 }
 
 /* Core 0: BMI270 shake. Samples at the sensor's 100 Hz rate and feeds the
- * dynamic-acceleration detector: six alternating swings trigger dizzy.
+ * dynamic-acceleration detector: alternating swings trigger dizzy.
  * Gravity is removed first, so a shake counts in any direction and the
  * detector re-arms at each reversal instead of waiting for the device to
  * come to rest. */
@@ -311,6 +310,44 @@ static bool imu_init(void)
     return true;
 }
 
+static esp_err_t touch_read(uint8_t reg, uint8_t *buf, size_t len)
+{
+    return i2c_master_transmit_receive(s_touch_dev, &reg, 1, buf, len, 20);
+}
+
+static esp_err_t touch_write(uint8_t reg, uint8_t value)
+{
+    uint8_t b[2] = { reg, value };
+    return i2c_master_transmit(s_touch_dev, b, sizeof(b), 20);
+}
+
+/* The CST816S enters standby after 2 s idle and then NACKs its address until
+ * a touch wakes it, so a polled read can never see the finger leave. The panel
+ * reset shares its line: configure it right after the panel comes up, while
+ * the controller is still awake. Disabling auto-sleep costs ~1.6 mA. */
+static bool touch_init(void)
+{
+    if (s_touch_dev == NULL) return false;
+    vTaskDelay(pdMS_TO_TICKS(30));
+    esp_err_t e = ESP_FAIL;
+    for (int i = 0; i < 8; i++) {
+        e = touch_write(CST816_REG_DIS_AUTOSLEEP, 0x01);
+        if (e == ESP_OK) break;
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+    if (e != ESP_OK) {
+        ESP_LOGW(TAG, "touch wake failed: %s", esp_err_to_name(e));
+        return false;
+    }
+    uint8_t id = 0;
+    if (touch_read(CST816_REG_CHIP_ID, &id, 1) == ESP_OK) {
+        ESP_LOGI(TAG, "touch ready id=0x%02x", id);
+    } else {
+        ESP_LOGI(TAG, "touch ready");
+    }
+    return true;
+}
+
 /* Core 0: CST816S touch. Polls points and x/y; a deliberate back-and-forth
  * rub (stroke.c) posts happy, while a page flick still steps a page. */
 static void touch_task(void *arg)
@@ -329,9 +366,8 @@ static void touch_task(void *arg)
     stroke_init(&rub);
     bool logged = false;
     for (;;) {
-        uint8_t reg = CST816_REG_POINTS;
         uint8_t b[5];
-        esp_err_t e = i2c_master_transmit_receive(s_touch_dev, &reg, 1, b, sizeof(b), 20);
+        esp_err_t e = touch_read(CST816_REG_POINTS, b, sizeof(b));
         if (e == ESP_OK) {
             int pts = b[0] & 0x0f;
             int x = ((b[1] & 0x0f) << 8) | b[2];
@@ -1038,6 +1074,9 @@ static void log_gate_task(void *arg)
         bool connected = usb_serial_jtag_is_connected() || cue9_wifi_is_connected();
         if (connected != prev) {
             esp_log_level_set("*", connected ? ESP_LOG_INFO : ESP_LOG_NONE);
+            /* Polled touch reads would NACK on every attempt if the controller
+             * stopped responding; keep that noise out of the console. */
+            esp_log_level_set("i2c.master", ESP_LOG_NONE);
             prev = connected;
         }
         vTaskDelay(pdMS_TO_TICKS(250));
@@ -1118,8 +1157,9 @@ static void wait_build(void)
 
 void app_main(void)
 {
-    /* The CST816S NACKs every idle read; the i2c_master driver logs each one
-     * at ERROR. Touch is polled, so silence the driver and keep our own logs. */
+    /* Touch is polled; if the controller ever stops ACKing, the i2c driver
+     * would log an ERROR on every 30 ms attempt. Keep it quiet and report
+     * our own touch failures instead. */
     esp_log_level_set("i2c.master", ESP_LOG_NONE);
     esp_reset_reason_t rr = esp_reset_reason();
     if (s_boot_magic != BOOT_MAGIC) {
@@ -1151,6 +1191,7 @@ void app_main(void)
 
     board_power_and_backlight();
     panel_init();
+    touch_init();
     te_init();
     ESP_LOGI(TAG, "panel up internal=%u largest=%u",
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
@@ -1382,10 +1423,9 @@ void app_main(void)
         int base_ns = ns;
         bool urgent_base = (base_ns == PIP_APPROVAL || base_ns == PIP_MCQ);
 
-        /* Sensor reactions: six shakes show dizzy, six back-and-forth screen
-         * passes show happy. An approval/question outranks both: it cancels a
-         * running reaction and ignores new shakes or strokes until DSH
-         * answers it. */
+        /* Sensor reactions: a shake shows dizzy and a screen rub shows happy.
+         * An approval/question outranks both: it cancels a running reaction
+         * and ignores new shakes or strokes until DSH answers it. */
         {
             int64_t shake = s_shake_us;
             if (shake != 0 && shake != shake_seen && now - shake < 2000000LL) {

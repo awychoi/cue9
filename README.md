@@ -39,7 +39,7 @@ You need macOS 14 or newer, the Xcode command line tools, and DeepSeek Harness.
 
 Flashing the companion’s software (needs `esptool`) lives under **Device**; the wireless Pi link is under **Connect**.
 
-The app stores the mapping, colours, and recent history in `~/.dsh/cue9/`. Delete `mapping.json`, the two colour files, and their `.backup.json` copies to reset the app to its defaults.
+Settings and recent history live in `~/.dsh/cue9/`. To reset, delete `mapping.json` and the colour files (and their `.backup.json` copies).
 
 ## Troubleshooting
 

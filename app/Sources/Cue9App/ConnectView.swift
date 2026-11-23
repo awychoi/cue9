@@ -16,7 +16,7 @@ struct ConnectView: View {
     @State private var piError: String?
     @State private var piInstalling = false
     @State private var keepAwakeOn = false
-    @State private var showKeepAwakeWarning = false
+    @State private var showPhoneSetup = false
     @State private var showTrouble = false
     @State private var showSetupSteps = false
 
@@ -38,14 +38,13 @@ struct ConnectView: View {
                     ))
                 )
 
-                ConnectionMap(model: model)
-
                 if !model.dshOnline {
                     offlineNote
                 }
 
                 deepSeekCard
                 linkCard
+                phoneCard
                 keepAwakeCard
                 troubleshootingCard
             }
@@ -55,30 +54,29 @@ struct ConnectView: View {
             flasher.refreshPorts()
             hostField = model.linkHost
             linkChoice = model.linkTransport
-            keepAwakeOn = model.keepAwakeActive
+            keepAwakeOn = model.keepAwakeEnabled
+            if model.dshOnline && !model.phoneSetupBusy {
+                Task { await model.refreshPhoneSetup() }
+            }
         }
         .onChange(of: model.linkTransport) { _, value in
             linkChoice = value
         }
-        .onChange(of: model.keepAwakeActive) { _, value in
-            keepAwakeOn = value
+        .onChange(of: model.dshOnline) { _, online in
+            guard online, !model.phoneSetupBusy else { return }
+            Task { await model.refreshPhoneSetup() }
         }
-        .alert("Keep this Mac awake?", isPresented: $showKeepAwakeWarning) {
-            Button("Cancel", role: .cancel) { keepAwakeOn = model.keepAwakeActive }
-            Button("Keep awake") {
-                Task {
-                    await model.setKeepAwake(true)
-                    keepAwakeOn = model.keepAwakeActive
-                }
-            }
-        } message: {
-            Text("This keeps the Mac awake while DeepSeek is running. It uses more power, and closing the lid still sleeps.")
+        .onChange(of: model.keepAwakeEnabled) { _, value in
+            keepAwakeOn = value
         }
         .sheet(isPresented: $showProvision) {
             provisionSheet
         }
         .sheet(isPresented: $showPiSetup) {
             piSetupSheet
+        }
+        .sheet(isPresented: $showPhoneSetup) {
+            PhoneSetupSheet(model: model)
         }
     }
 
@@ -333,38 +331,96 @@ struct ConnectView: View {
         }
     }
 
+    // MARK: - Phone
+
+    private var phoneStatus: (text: String, color: Color) {
+        if !model.keychainAccessGranted { return ("Keychain access needed", Cue9Theme.warning) }
+        if model.appAuthConflict { return ("App authorization needed", Cue9Theme.warning) }
+        guard let setup = model.phoneSetup else {
+            return model.phoneSetupBusy ? ("Checking", Cue9Theme.soft) : ("Not checked", Cue9Theme.soft)
+        }
+        if setup.tailscale?.online != true { return ("Mac is offline in Tailscale", Cue9Theme.warning) }
+        if setup.serve?.active != true { return ("Needs setup", Cue9Theme.warning) }
+        if setup.phone?.push == true { return ("Ready · notifications on", Cue9Theme.success) }
+        if setup.phone?.paired == true { return ("Paired · notifications off", Cue9Theme.warning) }
+        return ("Ready · phone not paired", Cue9Theme.warning)
+    }
+
+    private var phoneCard: some View {
+        Card {
+            HStack(alignment: .top, spacing: 20) {
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 8) {
+                        Text("Approvals on your phone")
+                            .font(Cue9Font.font(15.5, .semibold))
+                            .foregroundStyle(Cue9Theme.ink)
+                        Pill(text: phoneStatus.text, color: phoneStatus.color)
+                    }
+                    Text("Answer approvals and questions from your iPhone, on Wi-Fi or Tailscale. The full command and every choice show up on the phone.")
+                        .font(Cue9Font.font(12))
+                        .foregroundStyle(Cue9Theme.muted)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if let error = model.phoneError, !model.phoneSetupBusy {
+                        Text(error)
+                            .font(Cue9Font.font(10.5))
+                            .foregroundStyle(Cue9Theme.danger)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .padding(.top, 2)
+                    }
+                }
+                Spacer(minLength: 16)
+                VStack(alignment: .trailing, spacing: 7) {
+                    Button("Set up phone") { showPhoneSetup = true }
+                        .buttonStyle(PrimaryButtonStyle())
+                        .disabled(!model.dshOnline || !model.keychainAccessGranted)
+                    TextLink(title: "Why Keychain?", systemImage: "questionmark.circle") {
+                        model.showKeychainExplainer()
+                    }
+                    if model.appAuthConflict {
+                        TextLink(title: "Reset app authorization", systemImage: "key") {
+                            Task { await model.resetAppAuthorization() }
+                        }
+                        .disabled(model.phoneSetupBusy)
+                    }
+                }
+            }
+        }
+    }
+
     // MARK: - Keep awake
 
     private var keepAwakeCard: some View {
         Card {
             HStack(alignment: .top, spacing: 20) {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Keep this Mac awake")
+                    Text("Keep this Mac awake while DSH works")
                         .font(Cue9Font.font(15.5, .semibold))
                         .foregroundStyle(Cue9Theme.ink)
-                    Text("cue9 can't follow DeepSeek while the Mac sleeps.")
+                    Text(model.keepAwakeActive
+                         ? "Awake now — \(model.keepAwakeReason); closing the lid still sleeps."
+                         : "Sleep allowed — \(model.keepAwakeReason); closing the lid still sleeps.")
                         .font(Cue9Font.font(12))
-                        .foregroundStyle(Cue9Theme.muted)
+                        .foregroundStyle(model.keepAwakeActive ? Cue9Theme.ink2 : Cue9Theme.muted)
                         .fixedSize(horizontal: false, vertical: true)
-                    Text("Uses more power. Closing the lid still sleeps.")
-                        .font(Cue9Font.font(10))
-                        .foregroundStyle(Cue9Theme.soft)
-                        .padding(.top, 2)
+                    if model.appAuthConflict {
+                        Text("App authorization needs a reset — see Approvals on your phone.")
+                            .font(Cue9Font.font(10))
+                            .foregroundStyle(Cue9Theme.warning)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .padding(.top, 1)
+                    }
                 }
                 Spacer(minLength: 16)
                 Toggle("", isOn: $keepAwakeOn)
                     .toggleStyle(.switch)
                     .labelsHidden()
                     .controlSize(.small)
-                    .disabled(model.linkBusy || !model.dshOnline)
+                    .disabled(!model.dshOnline || !model.keychainAccessGranted || model.phonePower == nil)
                     .onChange(of: keepAwakeOn) { _, value in
-                        if value && !model.keepAwakeActive {
-                            showKeepAwakeWarning = true
-                        } else if !value && model.keepAwakeActive {
-                            Task {
-                                await model.setKeepAwake(false)
-                                keepAwakeOn = model.keepAwakeActive
-                            }
+                        guard value != model.keepAwakeEnabled else { return }
+                        Task {
+                            await model.setKeepAwake(value)
+                            keepAwakeOn = model.keepAwakeEnabled
                         }
                     }
             }
@@ -573,103 +629,6 @@ struct ConnectView: View {
     private func openDSH() {
         let fallback = model.dshOnline ? URL(string: model.dshURLString) : nil
         DSHLauncher.open(webFallback: fallback)
-    }
-}
-
-// MARK: - Connection map
-
-private struct ConnectionMap: View {
-    @ObservedObject var model: AppModel
-
-    var body: some View {
-        HStack(spacing: 0) {
-            node(
-                image: DSHLauncher.icon,
-                symbol: "brain.head.profile",
-                title: "DeepSeek",
-                value: model.dshOnline ? "Connected" : (model.isReconnecting ? "Looking…" : "Offline"),
-                color: model.dshOnline ? Cue9Theme.success : Cue9Theme.warning
-            )
-            line(active: model.dshOnline)
-            node(
-                symbol: model.linkTransport == "wifi" ? "wifi" : "powerplug",
-                title: model.linkTransport == "wifi" ? "Wi-Fi" : "USB cable",
-                value: model.moteConnected ? "Connected" : "Not connected",
-                color: model.moteConnected ? Cue9Theme.success : Cue9Theme.warning
-            )
-            line(active: model.moteConnected)
-            node(
-                image: Cue9Assets.image("cue9-icon"),
-                symbol: "pawprint.fill",
-                title: "cue9",
-                value: model.moteConnected ? "Connected" : (model.flasher.ports.isEmpty ? "Not found" : "Found on USB"),
-                color: model.moteConnected ? Cue9Theme.success : Cue9Theme.soft
-            )
-        }
-        .padding(.vertical, 18)
-        .padding(.horizontal, 24)
-        .background(Cue9Theme.surface, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .stroke(Cue9Theme.line, lineWidth: 1)
-        )
-    }
-
-    private func node(
-        image: NSImage? = nil,
-        symbol: String,
-        title: String,
-        value: String,
-        color: Color
-    ) -> some View {
-        VStack(spacing: 7) {
-            ZStack {
-                Circle()
-                    .fill(color.opacity(0.12))
-                    .frame(width: 46, height: 46)
-                if let image {
-                    Image(nsImage: image)
-                        .resizable()
-                        .interpolation(.high)
-                        .scaledToFit()
-                        .frame(width: 34, height: 34)
-                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                .stroke(.white.opacity(0.14), lineWidth: 1)
-                        )
-                } else {
-                    Image(systemName: symbol)
-                        .font(.system(size: 17, weight: .medium))
-                        .foregroundStyle(color)
-                }
-            }
-            Text(title)
-                .font(Cue9Font.font(11.5, .semibold))
-                .foregroundStyle(Cue9Theme.ink2)
-            Text(value)
-                .font(Cue9Font.font(9.5))
-                .foregroundStyle(color)
-        }
-        .frame(maxWidth: .infinity)
-    }
-
-    private func line(active: Bool) -> some View {
-        ZStack {
-            Rectangle()
-                .fill(Cue9Theme.line)
-                .frame(height: 1)
-            if active {
-                Rectangle()
-                    .fill(Cue9Theme.success.opacity(0.55))
-                    .frame(height: 1)
-            }
-            Circle()
-                .fill(active ? Cue9Theme.success : Cue9Theme.lineStrong)
-                .frame(width: 5, height: 5)
-        }
-        .frame(width: 70)
-        .padding(.bottom, 26)
     }
 }
 

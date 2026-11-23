@@ -23,6 +23,9 @@ final class Cue9AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if CommandLine.arguments.contains("--snapshot-offline") {
             model.makeOfflineForSnapshot()
         }
+        if CommandLine.arguments.contains("--snapshot-phone") {
+            model.makePhoneSetupDemo()
+        }
         installMainMenu()
         installAppearanceObserver()
         if let snapshotPath {
