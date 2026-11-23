@@ -1,13 +1,12 @@
 /**
  * Host half of the cue9 phone bridge.
  *
- * Co-displays every approval/question in DSH's own UI and on the laptop panel /
- * phone. DSH's card is opened immediately; the first answer (DSH, panel, or
- * phone) wins, and a cue9 answer cancels DSH's card by aborting the projected
- * request signal. No handoff / "Show in DSH" step is needed.
+ * Co-displays every approval/question in DSH's own UI and on the phone. DSH's
+ * card is opened immediately; the first answer (DSH or phone) wins, and a phone
+ * answer cancels DSH's card by aborting the projected request signal. No handoff
+ * / "Show in DSH" step is needed.
  *
  * Security:
- * - Panel routes use DSH's own connection admission (owner Peer only).
  * - App routes use a Keychain-held bearer token, stored here as a hash.
  * - Every answer and ack is bound to the exact session and call.
  * - Pairing tokens are minted by the sessions service and never logged.
@@ -21,11 +20,10 @@ import { createPush } from './lib/push.js'
 import { createPower } from './lib/power.js'
 import { createAppAuth } from './lib/app-auth.js'
 import { createAudit } from './lib/audit.js'
-import { createPanelGuard } from './lib/panel-auth.js'
 import { createMoteAttention } from './lib/mote-attention.js'
 import { applySetup, resetSetup, setupStatus } from './lib/setup.js'
 
-const PANEL_PREFIX = '/plugins/cue9-phone'
+const PHONE_PREFIX = '/plugins/cue9-phone'
 const ARG_TTL_MS = 10 * 60 * 1000
 const PAIRING_TTL_MS = 2 * 60 * 1000
 
@@ -36,10 +34,6 @@ function sendJson(res, status, value) {
     'cache-control': 'no-store',
   })
   res.end(body)
-}
-
-function sendSse(res, event, data) {
-  res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
 }
 
 function readJson(req) {
@@ -109,9 +103,9 @@ function disabledPush() {
 
 /**
  * Race a co-displayed request. `next()` is called exactly once; the DSH card is
- * already open. The phone/panel wins only when its store promise resolves; a
- * phone answer aborts the DSH request signal to close that card. DSH-first
- * settlement closes the phone/panel surface without resolving its promise.
+ * already open. The phone wins only when its store promise resolves; a phone
+ * answer aborts the DSH request signal to close that card. DSH-first
+ * settlement closes the phone surface without resolving its promise.
  */
 export async function runCoDisplay({ store, pending, next, controller }) {
   let dshPromise
@@ -154,7 +148,6 @@ export async function apply(ctx) {
   const sessions = createSessions({ dir: config.sessionsDir ?? PHONE_DIR, log: console.log })
   const appAuth = createAppAuth({ path: config.appAuthPath ?? `${PHONE_DIR}/app-auth.json` })
   const audit = createAudit({ path: config.auditPath ?? `${PHONE_DIR}/audit.jsonl` })
-  const panelGuard = createPanelGuard({ ctx })
   const moteAttention = createMoteAttention({
     origin: () => {
       try { return ctx.get('webServer')?.getOrigin() } catch { return undefined }
@@ -162,7 +155,6 @@ export async function apply(ctx) {
     log: console.log,
   })
   const args = new Map()
-  const panelClients = new Set()
   let activeApprovals = 0
   let activeQuestions = 0
   const power = createPower({
@@ -188,20 +180,9 @@ export async function apply(ctx) {
   }
 
   const phoneAlive = () => (phone?.clients.size ?? 0) > 0 || push.hasSubscriptions() === true
-  const hasSurface = () => panelClients.size > 0 || phoneAlive()
-
-  function panelBroadcast(event, data) {
-    for (const res of [...panelClients]) {
-      try {
-        sendSse(res, event, data)
-      } catch {
-        panelClients.delete(res)
-      }
-    }
-  }
+  const hasSurface = () => phoneAlive()
 
   store.on('request', request => {
-    panelBroadcast('request', request)
     phone?.broadcast('request', request)
     // A foreground phone acknowledges immediately; a suspended phone does not.
     // Wait one beat before pushing so an open app is not notified twice.
@@ -213,7 +194,6 @@ export async function apply(ctx) {
     timer.unref?.()
   })
   store.on('resolved', result => {
-    panelBroadcast('resolved', result)
     phone?.broadcast('resolved', result)
   })
 
@@ -290,7 +270,7 @@ export async function apply(ctx) {
         moteAttention.hold(pending.reqId, 'approval')
         try {
           // The gateway projects req.signal onto the DSH card. Aborting our
-          // controller from the phone/panel winner closes that card.
+          // controller from the phone winner closes that card.
           req.signal = controller.signal
           return await runCoDisplay({ store, pending, next, controller })
         } finally {
@@ -381,15 +361,6 @@ export async function apply(ctx) {
       })
     }
 
-    function guardPanel(req, res) {
-      const result = panelGuard(req)
-      if (!result.ok) {
-        denied(res, result.status, 'panel')
-        return undefined
-      }
-      return result.peer
-    }
-
     function guardApp(req, res, { post = false, auditSource = 'app' } = {}) {
       if (!isLoopback(req.socket.remoteAddress) || !isLocalHost(req)) {
         denied(res, 403, auditSource)
@@ -459,128 +430,11 @@ export async function apply(ctx) {
       return true
     }
 
-    function panelAudit(peer, reqId, sessionId, kind, outcome) {
-      audit.record({
-        source: 'panel',
-        principal: peer?.principal?.kind ?? 'owner',
-        reqId,
-        sessionId,
-        kind,
-        outcome,
-      })
-    }
-
-    // --- Panel routes (DSH browser/API Peer only) -------------------------
-
-    webCtx.effect(() => webCtx.webServer.register({
-      kind: 'exact',
-      path: `${PANEL_PREFIX}/pending`,
-      handler: (req, res) => {
-        const peer = guardPanel(req, res)
-        if (peer === undefined) return
-        if (req.method !== 'GET') return sendJson(res, 405, { ok: false, error: 'method-not-allowed' })
-        sendJson(res, 200, { requests: store.list() })
-      },
-    }), 'cue9-phone: panel pending')
-
-    webCtx.effect(() => webCtx.webServer.register({
-      kind: 'exact',
-      path: `${PANEL_PREFIX}/events`,
-      handler: (req, res) => {
-        const peer = guardPanel(req, res)
-        if (peer === undefined) return
-        if (req.method !== 'GET') return sendJson(res, 405, { ok: false, error: 'method-not-allowed' })
-        res.writeHead(200, {
-          'content-type': 'text/event-stream; charset=utf-8',
-          'cache-control': 'no-store',
-          connection: 'keep-alive',
-          'x-accel-buffering': 'no',
-        })
-        res.write(': connected\n\n')
-        panelClients.add(res)
-        sendSse(res, 'snapshot', { requests: store.list() })
-        const ping = setInterval(() => {
-          try { res.write(': ping\n\n') } catch { /* closed below */ }
-        }, 20_000)
-        ping.unref?.()
-        req.on('close', () => {
-          clearInterval(ping)
-          panelClients.delete(res)
-        })
-      },
-    }), 'cue9-phone: panel events')
-
-    webCtx.effect(() => webCtx.webServer.register({
-      kind: 'exact',
-      path: `${PANEL_PREFIX}/ack`,
-      handler: async (req, res) => {
-        const peer = guardPanel(req, res)
-        if (peer === undefined || !postOnly(req, res)) return
-        let body
-        try { body = await readJson(req) } catch (error) {
-          panelAudit(peer, null, null, 'request', 'invalid-body')
-          return sendJson(res, 400, { ok: false, error: String(error.message ?? error) })
-        }
-        const reqId = String(body?.reqId ?? '')
-        const pending = store.inspect(reqId)
-        const result = store.ack(reqId, 'panel', { sessionId: body?.sessionId, callId: body?.callId })
-        panelAudit(
-          peer,
-          reqId,
-          pending?.sessionId ?? body?.sessionId,
-          pending?.kind ?? 'request',
-          result.ok ? 'ack' : result.error
-        )
-        const status = result.ok ? 200 : result.error === 'not-found' ? 404 : result.error === 'claim-mismatch' ? 409 : 400
-        sendJson(res, status, result)
-      },
-    }), 'cue9-phone: panel ack')
-
-    webCtx.effect(() => webCtx.webServer.register({
-      kind: 'exact',
-      path: `${PANEL_PREFIX}/answer`,
-      handler: async (req, res) => {
-        const peer = guardPanel(req, res)
-        if (peer === undefined || !postOnly(req, res)) return
-        let body
-        try { body = await readJson(req) } catch (error) {
-          panelAudit(peer, null, null, 'request', 'invalid-body')
-          return sendJson(res, 400, { ok: false, error: String(error.message ?? error) })
-        }
-        const reqId = String(body?.reqId ?? '')
-        const pending = store.inspect(reqId)
-        const result = store.answer(reqId, body, 'panel', { sessionId: body?.sessionId, callId: body?.callId })
-        const outcome = result.ok
-          ? (pending?.kind === 'approval' ? String(body?.outcome ?? 'answered') : 'answered')
-          : result.error
-        panelAudit(
-          peer,
-          reqId,
-          pending?.sessionId ?? body?.sessionId,
-          pending?.kind ?? 'request',
-          outcome
-        )
-        const status = result.ok ? 200 : result.error === 'not-found' ? 404 : result.error === 'claim-mismatch' ? 409 : 400
-        sendJson(res, status, result)
-      },
-    }), 'cue9-phone: panel answer')
-
-    webCtx.effect(() => webCtx.webServer.register({
-      kind: 'exact',
-      path: `${PANEL_PREFIX}/handoff`,
-      handler: (req, res) => {
-        const peer = guardPanel(req, res)
-        if (peer === undefined) return
-        panelAudit(peer, null, null, 'request', 'handoff-removed')
-        sendJson(res, 410, { ok: false, error: 'handoff-removed' })
-      },
-    }), 'cue9-phone: panel handoff removed')
-
     // --- App routes (Keychain bearer, loopback + exact DSH Host) ----------
 
     webCtx.effect(() => webCtx.webServer.register({
       kind: 'exact',
-      path: `${PANEL_PREFIX}/app/register`,
+      path: `${PHONE_PREFIX}/app/register`,
       handler: async (req, res) => {
         if (!guardRegister(req, res) || !postOnly(req, res)) return
         let body
@@ -610,7 +464,7 @@ export async function apply(ctx) {
 
     webCtx.effect(() => webCtx.webServer.register({
       kind: 'exact',
-      path: `${PANEL_PREFIX}/app/rotate`,
+      path: `${PHONE_PREFIX}/app/rotate`,
       handler: async (req, res) => {
         if (!guardRotate(req, res)) return
         let body
@@ -646,7 +500,7 @@ export async function apply(ctx) {
 
     webCtx.effect(() => webCtx.webServer.register({
       kind: 'exact',
-      path: `${PANEL_PREFIX}/setup`,
+      path: `${PHONE_PREFIX}/setup`,
       handler: async (req, res) => {
         if (!guardApp(req, res)) return
         if (req.method !== 'GET') return sendJson(res, 405, { ok: false, error: 'method-not-allowed' })
@@ -661,7 +515,7 @@ export async function apply(ctx) {
 
     webCtx.effect(() => webCtx.webServer.register({
       kind: 'exact',
-      path: `${PANEL_PREFIX}/setup/pairing`,
+      path: `${PHONE_PREFIX}/setup/pairing`,
       handler: async (req, res) => {
         if (!guardApp(req, res, { post: true })) return
         if (!postOnly(req, res)) return
@@ -695,7 +549,7 @@ export async function apply(ctx) {
 
     webCtx.effect(() => webCtx.webServer.register({
       kind: 'exact',
-      path: `${PANEL_PREFIX}/setup/apply`,
+      path: `${PHONE_PREFIX}/setup/apply`,
       handler: async (req, res) => {
         if (!guardApp(req, res, { post: true })) return
         if (!postOnly(req, res)) return
@@ -726,7 +580,7 @@ export async function apply(ctx) {
 
     webCtx.effect(() => webCtx.webServer.register({
       kind: 'exact',
-      path: `${PANEL_PREFIX}/setup/reset`,
+      path: `${PHONE_PREFIX}/setup/reset`,
       handler: async (req, res) => {
         if (!guardApp(req, res, { post: true })) return
         if (!postOnly(req, res)) return
@@ -753,7 +607,7 @@ export async function apply(ctx) {
 
     webCtx.effect(() => webCtx.webServer.register({
       kind: 'exact',
-      path: `${PANEL_PREFIX}/setup/revoke`,
+      path: `${PHONE_PREFIX}/setup/revoke`,
       handler: async (req, res) => {
         if (!guardApp(req, res, { post: true })) return
         if (!postOnly(req, res)) return
@@ -789,7 +643,7 @@ export async function apply(ctx) {
 
     webCtx.effect(() => webCtx.webServer.register({
       kind: 'exact',
-      path: `${PANEL_PREFIX}/setup/test-push`,
+      path: `${PHONE_PREFIX}/setup/test-push`,
       handler: async (req, res) => {
         if (!guardApp(req, res, { post: true })) return
         if (!postOnly(req, res)) return
@@ -816,7 +670,7 @@ export async function apply(ctx) {
 
     webCtx.effect(() => webCtx.webServer.register({
       kind: 'exact',
-      path: `${PANEL_PREFIX}/power`,
+      path: `${PHONE_PREFIX}/power`,
       handler: async (req, res) => {
         if (!guardApp(req, res, { post: req.method === 'POST' })) return
         if (req.method === 'GET') {

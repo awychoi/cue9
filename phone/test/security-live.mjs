@@ -119,28 +119,6 @@ async function main() {
   if (!PHONE_READY) skip('phone probes: phone.json has no usable publicOrigin')
   if (!HAS_APP_TOKEN) skip('app Bearer probes: CUE9_APP_TOKEN is not set')
 
-  // --- Panel: DSH auth, Host/Origin fence --------------------------------
-
-  const panelPending = await request(dsh('/plugins/cue9-phone/pending'))
-  check('panel pending rejects no DSH cookie', panelPending.status === 401, panelPending.status)
-
-  const panelEvilHost = await request(dsh('/plugins/cue9-phone/pending'), {
-    headers: { host: 'evil.com' },
-  })
-  check('panel pending rejects Host evil.com', panelEvilHost.status === 401 || panelEvilHost.status === 403, panelEvilHost.status)
-
-  const panelEvilOrigin = await request(dsh('/plugins/cue9-phone/pending'), {
-    headers: { origin: 'http://evil.com' },
-  })
-  check('panel pending rejects Origin evil.com', panelEvilOrigin.status === 401 || panelEvilOrigin.status === 403, panelEvilOrigin.status)
-
-  const answerNoCookie = await request(dsh('/plugins/cue9-phone/answer'), {
-    method: 'POST',
-    headers: { 'x-cue9-phone': '1', origin: DSH.origin },
-    body: { reqId: 'bogus', sessionId: 's', callId: 'c', outcome: 'allowed-once' },
-  })
-  check('panel answer rejects no DSH cookie', answerNoCookie.status === 401, answerNoCookie.status)
-
   // --- App routes: unauthenticated checks --------------------------------
 
   const setupNoAuth = await request(dsh('/plugins/cue9-phone/setup'))

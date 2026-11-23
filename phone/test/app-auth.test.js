@@ -5,7 +5,6 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createAppAuth } from '../lib/app-auth.js'
 import { createAudit } from '../lib/audit.js'
-import { createPanelGuard } from '../lib/panel-auth.js'
 import { safeSetupStatus } from '../index.js'
 
 function tempDir(t) {
@@ -104,7 +103,7 @@ test('audit writes only the allowed fields and rotates at 1 MiB', (t) => {
   const path = join(dir, 'audit.jsonl')
   const audit = createAudit({ path })
   audit.record({
-    source: 'panel',
+    source: 'phone',
     principal: 'owner',
     deviceId: 'dev_1',
     reqId: 'r_1',
@@ -115,7 +114,7 @@ test('audit writes only the allowed fields and rotates at 1 MiB', (t) => {
     code: 'do not write me either',
   })
   const first = JSON.parse(readFileSync(path, 'utf8').trim())
-  assert.equal(first.source, 'panel')
+  assert.equal(first.source, 'phone')
   assert.equal(first.principal, 'owner')
   assert.equal(first.kind, 'approval')
   assert.equal(first.outcome, 'allowed-once')
@@ -131,42 +130,3 @@ test('audit writes only the allowed fields and rotates at 1 MiB', (t) => {
   assert.equal(JSON.parse(lines[0]).outcome, 'applied')
 })
 
-test('panel guard requires an owner Peer and fails closed', () => {
-  const owner = { principal: { kind: 'owner' } }
-  const allowed = createPanelGuard({
-    ctx: { get: () => ({ admit: () => ({ peer: owner }) }) },
-  })
-  assert.deepEqual(allowed({}), { ok: true, peer: owner })
-
-  const foreign = createPanelGuard({
-    ctx: { get: () => ({ admit: () => ({ peer: { principal: { kind: 'delegate' } } }) }) },
-  })
-  assert.deepEqual(foreign({}), { ok: false, status: 403 })
-
-  const rejected = createPanelGuard({
-    ctx: { get: () => ({ admit: () => ({ rejection: 403 }) }) },
-  })
-  assert.deepEqual(rejected({}), { ok: false, status: 403 })
-
-  const evilHost = createPanelGuard({
-    ctx: {
-      get: () => ({
-        admit: req => req.headers.host === 'evil.com' ? { rejection: 403 } : { peer: owner },
-      }),
-    },
-  })
-  assert.deepEqual(evilHost({ headers: { host: 'evil.com' } }), { ok: false, status: 403 })
-
-  const unauthorized = createPanelGuard({
-    ctx: { get: () => ({ admit: () => ({ rejection: 401 }) }) },
-  })
-  assert.deepEqual(unauthorized({}), { ok: false, status: 401 })
-
-  const absent = createPanelGuard({ ctx: { get: () => undefined } })
-  assert.deepEqual(absent({}), { ok: false, status: 401 })
-
-  const thrown = createPanelGuard({
-    ctx: { get: () => ({ admit: () => { throw new Error('no') } }) },
-  })
-  assert.deepEqual(thrown({}), { ok: false, status: 401 })
-})

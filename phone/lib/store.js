@@ -1,4 +1,4 @@
-/** In-memory pending approvals/questions shared by the laptop panel and phone. */
+/** In-memory pending approvals/questions shared by the phone and DSH. */
 import { EventEmitter } from 'node:events'
 import { randomUUID } from 'node:crypto'
 import {
@@ -34,7 +34,7 @@ export class RequestStore extends EventEmitter {
   }
 
   /**
-   * Hold one request until the panel, the phone, or DSH itself answers it.
+   * Hold one request until the phone or DSH itself answers it.
    * @param {object} request - normalized request from the Host listener.
    * @returns {object} the pending record.
    */
@@ -180,7 +180,7 @@ export class RequestStore extends EventEmitter {
     }
   }
 
-  /** Accept an answer from the phone or the laptop panel, bound to the claim. */
+  /** Accept an answer from the phone, bound to the claim. */
   answer(reqId, value, source, claim) {
     const pending = this.items.get(reqId)
     if (pending === undefined || pending.settled) {
@@ -202,7 +202,7 @@ export class RequestStore extends EventEmitter {
   }
 
   /**
-   * DSH answered first: close the phone/panel surface, but leave the phone
+   * DSH answered first: close the phone surface, but leave the phone
    * answer promise unresolved. The Host listener returns the DSH result.
    */
   settleFromDsh(reqId, value, source = 'dsh') {
@@ -211,7 +211,7 @@ export class RequestStore extends EventEmitter {
     return this.#closeSurface(pending, source, value)
   }
 
-  /** DSH rejected/cancelled: close the phone/panel surface without a result. */
+  /** DSH rejected/cancelled: close the phone surface without a result. */
   abortFromDsh(reqId, error) {
     const pending = this.items.get(reqId)
     if (pending === undefined || pending.settled) return false
@@ -273,7 +273,7 @@ export class RequestStore extends EventEmitter {
   }
 
   /**
-   * Remove the phone/panel surface and announce it, without resolving the
+   * Remove the phone surface and announce it, without resolving the
    * Host tool result. Used by DSH-first settlement, cancellation, and timeout.
    */
   #closeSurface(pending, source, value) {

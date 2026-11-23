@@ -564,9 +564,9 @@ function connect() {
     let data
     try { data = JSON.parse(event.data) } catch { return }
     removeRequest(data.reqId)
-    if (data.source === 'panel') toast('Answered on your Mac.')
+    if (data.source === 'dsh' || data.source === 'panel') toast('Answered on your Mac.')
     else if (data.source === 'phone') toast('Sent. DSH is continuing.')
-    else if (data.source === 'abort') toast('That request was cancelled.')
+    else if (data.source === 'dsh-abort' || data.source === 'abort') toast('That request was cancelled.')
   })
   source.addEventListener('handoff', event => {
     let data

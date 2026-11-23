@@ -16,7 +16,7 @@ export function requestTitle(kind) {
 
 /**
  * Copy approval arguments so a later mutation by the tool/agent cannot change
- * what the panel or phone displays. Uses structuredClone when available and
+ * what the phone displays. Uses structuredClone when available and
  * falls back to JSON for plain values. Returns undefined when uncopyable.
  */
 export function cloneApprovalArguments(value) {

@@ -32,7 +32,7 @@ function validSubscription(subscription) {
 
 /**
  * Lock-screen safe payload. Deliberately excludes command, args, reason,
- * question text, cwd, and session id; the full detail stays in the app/panel.
+ * question text, cwd, and session id; the full detail stays in the app.
  */
 export function buildPushPayload(request) {
   const approval = request?.kind === 'approval'

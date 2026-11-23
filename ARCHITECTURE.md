@@ -51,8 +51,6 @@ changes on load. Shake and stroke can be previewed and coloured but not mapped.
 
 | Call | Purpose |
 |---|---|
-| `GET /plugins/cue9-phone/pending` | Pending requests for the DSH panel |
-| `POST /plugins/cue9-phone/answer` | Answer from the DSH panel |
 | `/plugins/cue9-phone/setup/*` | Status, pairing, apply, reset, revoke |
 | `POST /plugins/cue9-phone/app/register` | Authorize this Mac’s app |
 | `POST /plugins/cue9-phone/power` | Keep the Mac awake |
@@ -60,16 +58,16 @@ changes on load. Shake and stroke can be previewed and coloured but not mapped.
 The plugin serves the phone app on loopback; its `/api/*` routes handle pairing, pending requests,
 answers, and push. `tailscale serve` publishes it on port 8443 to the tailnet; an optional LAN
 HTTPS listener uses the same certificate for the home-Wi-Fi fallback. Pairing is a one-time QR;
-sessions, push keys, and subscriptions live under `~/.dsh/cue9/phone/`. Panel routes use DSH’s
-own admission; Mac-only routes use the app’s Keychain token, stored as a hash; the phone uses a
-paired session cookie. There is no public ingress.
+sessions, push keys, and subscriptions live under `~/.dsh/cue9/phone/`. Mac-only routes use the
+app’s Keychain token, stored as a hash; the phone uses a paired session cookie. There is no public
+ingress.
 
 ## Behaviour
 
 - **Priority** — approvals and questions outrank everything. Sleep starts after five minutes
   without work; a new session gets one wake beat; a lost heartbeat falls back to `hub`.
-- **Answers** — each approval and question appears in DSH, on the laptop panel, and on the phone.
-  The first answer wins; answering in cue9 cancels DSH’s card, so there is no hand-off step.
+- **Answers** — each approval and question appears in DSH and on the phone. The first answer wins;
+  answering on the phone cancels DSH’s card, so there is no hand-off step.
 - **Pages** — face, clock, weather. Swipe or send `PAGE <0|1|2>`. Attention takes the screen
   temporarily, then restores the page underneath.
 - **Clock and weather** — the Pi sends `TIME` every 15 s and `WX` every 15 minutes. The app sets
