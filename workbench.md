@@ -11,10 +11,10 @@ logo_light: brand/decided/final/cue9-lockup.svg
 
 ## How it started
 
-Long coding sessions meant either constantly tabbing back to check progress or realizing hours later that an agent had been stalled on an approval. So I built cue9 so it budges me only when it needs me but I can still keep an eye on it if I want.
+During long coding sessions, I was either babysitting the tab or discovering hours later that an agent had stalled on an approval. I built cue9 so it nudges me only when I'm needed, with a glanceable view if I want to check in.
 
 ## What it is
 
-cue9 pairs a DSH plugin, a Mac app, an ESP32 desk companion, and an iPhone approval pipeline so you can focus on other work while your agents run.
+cue9 pairs a DSH plugin, a Mac app, a raspberry pi host, an ESP32 desk companion, and an iPhone approval pipeline so you can focus on other work while your agents run.
 
 Status cues travel over SSH through a Raspberry Pi to drive the companion's animations, while native Apple push notifications route remote approvals to a home-screen web app over Tailscale / LAN. Acting on either clears the other automatically.
